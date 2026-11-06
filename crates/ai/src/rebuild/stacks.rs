@@ -110,9 +110,17 @@ fn parse(text: &str) -> Result<Table, toml::de::Error> {
 
 /// A request as `asked_by` phrases are matched: lower-case words, punctuation turned into
 /// spaces, padded with spaces (`"Use Next.js, shadcn/ui"` → `" use next js shadcn ui "`).
+/// CJK counts as a separator too, so a phrase glued to Chinese still reads as its own word
+/// (`"用Three.js做"` → `" 用 three js 做 "`).
 pub fn words(request: &str) -> String {
     let lower = request.to_lowercase();
-    format!(" {} ", lower.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" "))
+    format!(" {} ", lower.split(|c: char| !c.is_alphanumeric() || cjk(c)).filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" "))
+}
+
+/// Ideographs, kana and hangul: alphabetic, but they glue onto English words when someone
+/// writes "ThreeJs的3D游戏", so they separate words instead.
+fn cjk(c: char) -> bool {
+    matches!(c, '\u{2E80}'..='\u{9FFF}' | '\u{AC00}'..='\u{D7AF}' | '\u{F900}'..='\u{FAFF}')
 }
 
 pub fn get(name: &str) -> Option<&'static Stack> {
@@ -315,5 +323,15 @@ mod tests {
         let unity = steps("Unity", Some(std::path::Path::new("/ed/Unity")));
         assert!(unity.contains("the editor is /ed/Unity") && !unity.contains('{'), "{unity}");
         assert_eq!(steps("Elm", None), "Use Elm. Create the project in app/ and make sure it builds or runs without errors.");
+    }
+
+    #[test]
+    fn three_js_is_named_in_english_and_next_to_cjk() {
+        for r in ["a game in three.js", "ThreeJS", "用Three.js做一个3D游戏", "生成ThreeJs的3D游戏", "a scene with three js"] {
+            assert_eq!(asked_for(&words(r)).map(|s| s.name.as_str()), Some("Three.js"), "{r}");
+        }
+        // The rendering contract reaches the builder's steps whenever the request names it.
+        let s = steps("Three.js", None);
+        assert!(s.contains("MeshStandardMaterial") && s.contains("ACESFilmicToneMapping") && s.contains("environment map"), "{s}");
     }
 }

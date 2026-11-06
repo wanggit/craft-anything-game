@@ -38,6 +38,8 @@ fn stack_choice() {
     assert_eq!(choose("Clone this website with React", &web).1, "React + TypeScript (Vite)");
     assert_eq!(choose(SAID_NEXT_SHADCN, &web), ("website", "Next.js + TypeScript"), "the stack the person named, not the default");
     assert_eq!(choose("Recreate this Steam game's gameplay", &TargetRef::None), ("game", "Unity"), "games default to Unity");
+    assert_eq!(choose("生成ThreeJs的3D游戏", &TargetRef::None), ("game", "Three.js"), "the Three.js the request names, not the Unity default");
+    assert_eq!(choose("用Three.js做一个3D游戏", &TargetRef::None).1, "Three.js");
     assert_eq!(choose("Rebuild this desktop application in Rust", &TargetRef::None), ("app", "Rust + egui (eframe)"));
     assert_eq!(choose("make a tool in python", &TargetRef::None).1, "Python");
     assert_eq!(choose("Recreate this game's core gameplay as a small game in Rust", &TargetRef::None).1, "Rust + macroquad");
@@ -282,7 +284,7 @@ fn the_assets_note_reads_prices_from_the_asset_table() {
     let d = tempfile::tempdir().unwrap();
     let ws = Workspace::create(d.path(), "Game", "A snake game", TargetRef::None).unwrap();
     // The default picture model is Nano Banana Pro ($0.15 a picture).
-    let before = "Realistic assets: you can make them with fal.ai. assets_model_generate makes a textured, game-ready low-poly 3D model (GLB) of one object from a description (about $0.65 each); set faces to the fewest that still look right (about 500-1500 for small props, 2000-5000 for weapons and vehicles, 6000-15000 for main characters) so the game stays fast; assets_image_generate makes a picture (about $0.15) for textures, skies, backgrounds and menu art. This project's asset budget is $5.00 ($0.00 used), so spend it on what the player sees most (the main characters, weapons, vehicles and the level's key props) and use simple shapes for the rest. Save each one inside app/ where the engine loads it (e.g. assets/generated/). Every asset is an original design in the original's style: describe what it is, its shape, materials and colours, never a recognisable character, logo or brand artwork. List each generated file in app/CREDITS.md as made with fal.ai.";
+    let before = "Realistic assets: you can make them with fal.ai. assets_model_generate makes a textured, game-ready 3D model (GLB) of one object from a description (about $0.65 each); give each one the faces its detail needs (about 1500-4000 for small props, 5000-12000 for weapons and vehicles, 12000-20000 for main characters) — these counts run fine in a browser; assets_image_generate makes a picture (about $0.15) for textures, skies, backgrounds and menu art. This project's asset budget is $5.00 ($0.00 used), so spend it on what the player sees most (the main characters, weapons, vehicles and the level's key props) and use simple shapes for the rest. Save each one inside app/ where the engine loads it (e.g. assets/generated/). Every asset is an original design in the original's style: describe what it is, its shape, materials and colours, never a recognisable character, logo or brand artwork. List each generated file in app/CREDITS.md as made with fal.ai.";
     assert_eq!(assets_note(&ws, None), before);
     assert_eq!(assets_note(&ws, Some("no-such-model")), before, "an unknown model quotes the default's prices");
     let schnell = assets_note(&ws, Some("flux-schnell"));
