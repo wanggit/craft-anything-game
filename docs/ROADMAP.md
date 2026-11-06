@@ -760,8 +760,9 @@ Gaps found while using the app for real projects.
       — claimed: sanketdofe, branch feature/r2.9-macos-menu-bar
 - [ ] macOS: an Edit menu (Undo, Cut, Copy, Paste, Select All). The keys work in text boxes, but
       the system's Edit items need the text box to answer them, so they'd show greyed out today
-- [ ] The welcome screen draws its Chinese text as boxes (□□□□) while the settings screens draw
-      it fine: that screen's font has no CJK glyphs (seen in a screenshot of the app)
+- [x] The welcome screen draws its Chinese text as boxes (□□□□) while the settings screens draw
+      it fine: that screen's font has no CJK glyphs (seen in a screenshot of the app) — resolved
+      (the person reports the welcome screen draws Chinese correctly now; no code change here)
 
 ### R2.10 Pinned builds
 Owner: maintainers · Status: in progress
