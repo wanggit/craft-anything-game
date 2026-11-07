@@ -1,5 +1,5 @@
 //! Game assets the builder generates with fal.ai: `assets_image_generate` (a picture: a texture, a sky,
-//! concept art) and `assets_model_generate` (a low-poly GLB model, from a description or a picture). Each one
+//! concept art) and `assets_model_generate` (a game-ready GLB model, from a description or a picture). Each one
 //! is paid for, so a project has a budget: the builder spends freely under it, and the person is
 //! asked before it goes over. Nothing is generated unless the person turned it on for the project
 //! (`project_assets_allow`). Every asset and its cost is listed in the project (assets.json).
@@ -73,7 +73,7 @@ fn summaries() -> &'static (String, String) {
             about_usd(picture)
         );
         let model = format!(
-            "Make a game-ready, low-poly 3D model (GLB) with fal.ai (Tripo P1) and save it inside app/. Give a prompt (a picture is made first, then turned into the model) or an image (a web address, or a picture inside the project such as reference/picture-1.png). faces caps the face count ({} to {}, default {DEFAULT_FACES}): about 500-1500 for small props and pickups, 2000-5000 for weapons, furniture and vehicles, 6000-15000 for main characters; fewer faces run faster, so use the fewest that still look right. textured (default true) gives colours and surfaces. A textured model costs {} plus {} for the picture, counted against the project's asset budget; it takes a minute or two. Describe one original object per model; never ask for recognisable characters, logos or brand artwork. Returns where it was saved, the cost and the budget left.",
+            "Make a game-ready 3D model (GLB) with fal.ai (Tripo P1) and save it inside app/. Give a prompt (a picture is made first, then turned into the model) or an image (a web address, or a picture inside the project such as reference/picture-1.png). faces caps the face count ({} to {}, default {DEFAULT_FACES}): about 1500-4000 for small props and pickups, 5000-12000 for weapons, furniture and vehicles, 12000-20000 for main characters; give each model the faces its detail needs. textured (default true) gives colours and surfaces. A textured model costs {} plus {} for the picture, counted against the project's asset budget; it takes a minute or two. Describe one original object per model; never ask for recognisable characters, logos or brand artwork. Returns where it was saved, the cost and the budget left.",
             faces.start(),
             faces.end(),
             usd(textured),
@@ -115,7 +115,7 @@ pub struct ModelParams {
 }
 
 /// A mid-sized game prop: detailed enough up close, cheap to draw many of.
-const DEFAULT_FACES: u32 = 3000;
+const DEFAULT_FACES: u32 = 8000;
 
 /// What a generation needs: the keys, the providers, the inbox (for the over-budget question) and
 /// the project.
@@ -368,7 +368,7 @@ mod tests {
         );
         assert_eq!(
             summaries().1,
-            "Make a game-ready, low-poly 3D model (GLB) with fal.ai (Tripo P1) and save it inside app/. Give a prompt (a picture is made first, then turned into the model) or an image (a web address, or a picture inside the project such as reference/picture-1.png). faces caps the face count (48 to 20000, default 3000): about 500-1500 for small props and pickups, 2000-5000 for weapons, furniture and vehicles, 6000-15000 for main characters; fewer faces run faster, so use the fewest that still look right. textured (default true) gives colours and surfaces. A textured model costs $0.50 plus $0.15 for the picture, counted against the project's asset budget; it takes a minute or two. Describe one original object per model; never ask for recognisable characters, logos or brand artwork. Returns where it was saved, the cost and the budget left."
+            "Make a game-ready 3D model (GLB) with fal.ai (Tripo P1) and save it inside app/. Give a prompt (a picture is made first, then turned into the model) or an image (a web address, or a picture inside the project such as reference/picture-1.png). faces caps the face count (48 to 20000, default 8000): about 1500-4000 for small props and pickups, 5000-12000 for weapons, furniture and vehicles, 12000-20000 for main characters; give each model the faces its detail needs. textured (default true) gives colours and surfaces. A textured model costs $0.50 plus $0.15 for the picture, counted against the project's asset budget; it takes a minute or two. Describe one original object per model; never ask for recognisable characters, logos or brand artwork. Returns where it was saved, the cost and the budget left."
         );
     }
 

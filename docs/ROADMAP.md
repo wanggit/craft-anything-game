@@ -625,6 +625,12 @@ Owner: open · Status: in progress
 - [ ] Make: a game whose request names a technology the stack table doesn't know (Phaser, Bevy…)
       still needs the default engine installed to start, though the builder is told to use what
       was named; ask the person, or let such a game start without an engine
+- [x] Three.js rebuilds come out flat and low-detail: the stack table has no Three.js entry (a
+      request naming it is recorded as Unity and gets no rendering guidance), and the asset note
+      asks for "the fewest faces that still look right". A Three.js stack (its own setup steps
+      and a look contract: PBR materials with maps, environment lighting, tone mapping, soft
+      shadows, fog) and higher face guidance in the assets note and `assets_model_generate`
+      — claimed: claude, branch feature/r2.7-threejs-quality; PR #1
 - [x] The website check's missing-site note names every place `site_dir` accepts (dist/, build/,
       out/, or a plain index.html with no package.json) and the app's real place, "app/" or "the
       project folder" (#494)
@@ -754,6 +760,9 @@ Gaps found while using the app for real projects.
       — claimed: sanketdofe, branch feature/r2.9-macos-menu-bar
 - [ ] macOS: an Edit menu (Undo, Cut, Copy, Paste, Select All). The keys work in text boxes, but
       the system's Edit items need the text box to answer them, so they'd show greyed out today
+- [x] The welcome screen draws its Chinese text as boxes (□□□□) while the settings screens draw
+      it fine: that screen's font has no CJK glyphs (seen in a screenshot of the app) — resolved
+      (the person reports the welcome screen draws Chinese correctly now; no code change here)
 
 ### R2.10 Pinned builds
 Owner: maintainers · Status: in progress

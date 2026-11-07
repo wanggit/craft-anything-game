@@ -87,6 +87,13 @@ uses = ["eframe", "egui"]
 steps = "Use Rust with eframe/egui for the window and UI. Create a cargo project in app/ itself (app/Cargo.toml, not a folder inside app/) and run `cargo build` until it succeeds."
 
 [[stack]]
+name = "Three.js"
+site = true
+asked_by = [" three js ", " threejs "]
+uses = ["three"]
+steps = "Use Three.js (the three package) with Vite or plain ES modules. Create the project in app/: package.json with three and a \"build\" script that bundles to app/dist (vite.config.ts with base './' when using Vite), index.html, src/. Then run `npm install` and `npm run build` from app/ until it succeeds; the output must be app/dist and must work when served as static files. When the brief asks the program for `--screenshot <file.png>` or `--self-test <file.json>` (games do), the checks start a program, not a page: wrap app/dist in a minimal Electron app (electron in devDependencies, a main.js that loads the built page; `--screenshot` waits for the scene to settle then saves `win.webContents.capturePage()` to the given file and quits, `--self-test` drives the game with `win.webContents.executeJavaScript` and writes the JSON report). Make it look like a finished 3D game, not a test scene: every visible surface a MeshStandardMaterial or MeshPhysicalMaterial with real maps (colour, roughness and metalness, and a normal map where the surface has detail), never flat colours on MeshBasicMaterial; light it like a place — an environment map for the ambient light (RoomEnvironment through PMREMGenerator, or an HDRI sky) plus one directional sun with soft shadows (PCFSoftShadowMap, its shadow camera fitted to the scene) — set ACESFilmicToneMapping and sRGB colour output, fog matched to the sky colour and a sky-coloured background rather than flat black, and antialiasing on (antialias: true, or an SMAA pass) with the pixel ratio capped at 2. Frame the camera like the original (its height, distance and field of view, about 50-60 degrees)."
+
+[[stack]]
 name = "Unity"
 engine = "unity"
 found_by = ["ProjectSettings/ProjectVersion.txt"]
