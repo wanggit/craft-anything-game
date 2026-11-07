@@ -85,7 +85,7 @@ Issues are ranked by people affected and how badly, after leaving out what's alr
 | 3 | R2.7, R2.8 | — | Small gaps left in finished work |
 | 3 | R2.9 Everyday use, R2.10 Pinned builds | — | Open to anyone at any time; most lines stand alone |
 | 3 | R1.5 | — | Small leftovers |
-| Any | M3: R3.3, R3.9, R3.11 | — | Open lane |
+| Any | M3: R3.3, R3.9, R3.11, R3.14 | — | Open lane |
 | Later | R4.1 macOS CLI, R4.2 Managed tier | **decision** | Not before M5 |
 
 ---
@@ -864,6 +864,21 @@ Owner: open · Status: in progress
       template only real calendar dates in API paths (#602–#605, by Afloat16)
 - [x] Preserve empty query pairs when matching older stand-in recordings, without treating raw
       query separators as pairs — claimed: Afloat16, branch `bugfix/r3.13-preserve-empty-query-pairs-20261103`
+
+### R3.14 A stealth-resistant browser (Camoufox via Playwright)
+Owner: open · Status: in progress
+A site's anti-bot wall can flag the browser we launch as automation and lose a whole capture;
+Camoufox (a Firefox build made to look like a person's browser) passes those walls more often.
+It speaks Playwright, not CDP, so it needs its own engine and the browser seam the web tools share.
+- [ ] `camoufox` as an external engine (`crates/engines/src/table.rs`, a `tool_paths!` setting in
+      `settings.rs`) with a helper that drives Camoufox through its Playwright integration, JSON
+      lines over stdio via `platform::process` (deadlines, capped output, never argv), and
+      unit tests with a stand-in helper — claimed: claude, branch `feature/r3.14-camoufox-backend`
+- [ ] The web tools' page reads (navigate, evaluate, screenshot, network and console capture)
+      behind one browser seam, so `web_site_open`, `web_site_capture` and the other browser tools
+      can run on Camoufox when it is set in Settings → Engines
+- [ ] Live runs against real sites with Camoufox on macOS, and the success comparison against the
+      Chromium path; record results in tool-status.md
 
 ---
 
