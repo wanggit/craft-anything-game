@@ -377,6 +377,8 @@ pub fn glossary_word(ui: &mut Ui, word: &str, meaning: &str, font: egui::FontId)
 /// or once a second while the window is in the background: a build can run for an hour, and
 /// redrawing the whole window 30 times a second for it costs the battery.
 pub fn animate(ui: &Ui, every: std::time::Duration) {
+    // An animation is on screen: frames must keep coming (the watchdog acts if they stop).
+    crate::watchdog::want_tick();
     let focused = ui.input(|i| i.viewport().focused.unwrap_or(true));
     ui.ctx().request_repaint_after(if focused { every } else { std::time::Duration::from_secs(1) });
 }
@@ -481,6 +483,10 @@ pub fn working(ui: &mut Ui, title: &str, detail: Option<&str>) {
 /// `quiet` is how long since the work last had anything to say, when that's known: then the note
 /// says so plainly, because a calm note can't tell a long step from one that has stopped.
 pub fn working_since(ui: &mut Ui, title: &str, detail: Option<&str>, began: Option<std::time::Instant>, quiet: Option<std::time::Duration>) {
+    // The row carries a clock while the run works: frames must keep coming (the watchdog acts).
+    if began.is_some() {
+        crate::watchdog::want_tick();
+    }
     let t = Tokens::get(ui.ctx());
     let now = ui.input(|i| i.time);
     // The clock restarts when the row wasn't on screen a moment ago.

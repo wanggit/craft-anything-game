@@ -255,6 +255,20 @@ software), and a person reported "my CPU is fully used" (#579). Animations ask f
 at their own pace (`widgets::animate`, `widgets::Spinner`); check a library widget for
 `request_repaint` before using it for something long. Not measured on Windows here.
 
+**A window that stopped drawing while nothing looked wrong.** The app sat frozen for 48 minutes
+(plan card's clock stuck at "26m 48s") while the build behind it kept working: no panic in
+`desktop.log`, no lock held, main thread idle in the event loop. The clock is computed per frame,
+so a stopped timer means stopped frames, not a stopped build — read the frozen thing's own
+timestamps (`sample <pid>` for whether anything draws; the project's feed/usage/transcripts for
+whether the work is alive) before diagnosing the content. eframe 0.36 drops a repaint request
+once more than one pass has run since it was made, and if the dropped one was the last request in
+flight, nothing reschedules and the window never draws again (vendored fix,
+`vendor/eframe/CRAFT_ANYTHING.md`). The window now has a frame watchdog
+(`ui-egui/src/watchdog.rs`) that forces a frame when a ticking UI stops getting them and writes
+to `desktop.log` when frames stay gone, and `scripts/app.sh` runs with `RUST_LOG=trace` so the
+frame scheduler's own traces are in the log. Read those two before diagnosing the next freeze by
+hand. Not reproduced on purpose here.
+
 **Every tool offered to a model that can only use a few.** The builder on an API backend was sent
 all 33-41 Core and Build tools, about 23,000-30,000 characters of descriptions. A local 14B model
 (#417) called the study tools (`core_session_show`, `core_journal_read`) 35 times and never

@@ -222,6 +222,18 @@ desktop no longer lags; `WGPU_POWER_PREF=high`, `WGPU_ADAPTER_NAME=nvidia` and `
 `WGPU_POWER_PREF=none` still draw on NVIDIA. Desktops with monitors on one or two GPUs and Intel
 laptops are covered by unit tests on fake `/sys/class/drm` folders only.
 
+### A window that keeps drawing, and says so when it doesn't
+
+Once a window sat frozen for 48 minutes while a build worked behind it: eframe's frame scheduler
+can drop a repaint request as stale and never schedule another, so the window draws nothing again
+— no spinner, no clock, no content (2026-11-07 on macOS). Two things guard against that now: a
+vendored eframe that keeps such a request scheduling (`vendor/eframe`), and a frame watchdog
+(`ui-egui/src/watchdog.rs`) that forces a frame when a ticking UI stops getting them for 2 s and
+writes an error to `desktop.log` if frames stay gone. `scripts/app.sh` starts the app with
+`RUST_LOG=trace`, so the frame scheduler's own traces land in `desktop.log` for the next freeze.
+Checked by unit tests of the watchdog's decision and the log-level parsing; the freeze itself was
+diagnosed from one Mac's samples and is not reproduced on purpose.
+
 ## Known limits
 
 - Locks: every mutex but the browser viewer's goes through `platform::sync`. A deadlock on one thread or across

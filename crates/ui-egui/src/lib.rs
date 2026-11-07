@@ -41,6 +41,7 @@ pub mod state;
 pub mod theme;
 pub mod titlebar;
 pub mod usage;
+pub mod watchdog;
 pub mod widgets;
 pub mod workbench;
 
@@ -1942,6 +1943,9 @@ pub fn guard_ui(ui: &mut egui::Ui, what: &str, f: impl FnOnce(&mut egui::Ui)) {
 
 impl eframe::App for CraftApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // A frame is being drawn: the watchdog's stamp. The watchdog itself starts once.
+        watchdog::note_frame();
+        watchdog::start(ui.ctx().clone());
         // This frame is being built, so the ones before it have been shown.
         if let Some(f) = self.first_frames.as_mut() {
             f.drawn += 1;
