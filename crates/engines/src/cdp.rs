@@ -135,6 +135,12 @@ impl Deadline {
     pub fn expired(&self) -> bool {
         self.cancel.is_cancelled() || self.at.saturating_duration_since(Instant::now()).is_zero()
     }
+
+    /// The cancel flag this deadline watches (for work that outlives one deadline, like a
+    /// long-lived helper process).
+    pub fn cancel_token(&self) -> CancelToken {
+        self.cancel.clone()
+    }
 }
 
 fn timeout_err() -> ToolError {

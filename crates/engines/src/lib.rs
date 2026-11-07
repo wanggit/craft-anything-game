@@ -7,6 +7,7 @@
 
 pub mod adb;
 pub mod assets;
+pub mod camoufox;
 pub mod cdp;
 pub mod cutter;
 pub mod frida;

@@ -189,6 +189,14 @@ impl Engine {
                     format!("Install {} from Settings → Engines.", craft_anything_engines::display_name(id)),
                 ),
             },
+            Requires::AnyEngine(ids) => {
+                if ids.iter().any(|id| session.settings.engine_path(id).is_some()) {
+                    Availability::ok()
+                } else {
+                    let names: Vec<&str> = ids.iter().map(|id| craft_anything_engines::display_name(id)).collect();
+                    Availability::no(format!("This needs one of these installed: {}.", names.join(", ")), "Install one of them from Settings → Engines.")
+                }
+            }
             Requires::Os(hosts) => {
                 if hosts.contains(&std::env::consts::OS) {
                     Availability::ok()
