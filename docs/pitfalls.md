@@ -131,6 +131,12 @@ off the UI thread; a UI test that added pictures, ran three frames and then look
 fast machines and failed in CI on unrelated PRs. When work moves to a worker, grep the tests that
 call it and make them `wait` for the result, not `run_steps(n)`.
 
+**A stand-in started with extra arguments ran no tests.** The test binary re-entered with
+`--ignored --exact <name>` to stand in for a helper, carrying the helper's arguments; libtest
+reads every positional argument as a test-name filter and several filters must all match, so zero
+tests ran and the caller saw "the helper stopped". Pass a stand-in its inputs through the
+environment, and give the command no arguments the harness would read.
+
 ## Building and running
 
 **A model catalogue queried in the wrong project.** OpenCode V2's raw `api get /api/model` does
@@ -761,3 +767,9 @@ with a multi-megabyte line, not a short one.
 body, so its second copy was rejected before it could be discarded as a duplicate. Apply aggregate
 budgets only to distinct bodies actually retained. When a budget removes a body, preserve unavailable
 cached 304 responses and deduplicate identical omitted samples.
+
+**A browser outlived its close because only its supervisor was killed.** Closing the Camoufox site
+killed the Playwright helper that owned the browser; the browser itself lingered for seconds,
+dying only when its pipe closed (found by checking for survivors after a live run). Close a
+child's own children through their API before killing the supervisor, and check after a live run
+that nothing is left, distinguishing what another app on the machine runs.

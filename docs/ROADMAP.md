@@ -870,15 +870,22 @@ Owner: open · Status: in progress
 A site's anti-bot wall can flag the browser we launch as automation and lose a whole capture;
 Camoufox (a Firefox build made to look like a person's browser) passes those walls more often.
 It speaks Playwright, not CDP, so it needs its own engine and the browser seam the web tools share.
-- [ ] `camoufox` as an external engine (`crates/engines/src/table.rs`, a `tool_paths!` setting in
-      `settings.rs`) with a helper that drives Camoufox through its Playwright integration, JSON
-      lines over stdio via `platform::process` (deadlines, capped output, never argv), and
-      unit tests with a stand-in helper — claimed: claude, branch `feature/r3.14-camoufox-backend`
-- [ ] The web tools' page reads (navigate, evaluate, screenshot, network and console capture)
-      behind one browser seam, so `web_site_open`, `web_site_capture` and the other browser tools
-      can run on Camoufox when it is set in Settings → Engines
-- [ ] Live runs against real sites with Camoufox on macOS, and the success comparison against the
-      Chromium path; record results in tool-status.md
+- [x] `camoufox` as an external engine (`crates/engines/src/table.rs`, a `tool_paths!` setting in
+      `settings.rs`) with a helper that drives Camoufox through its Playwright integration,
+      requests as JSON lines on stdio via `platform::process` (deadlines, capped output, payloads
+      that can grow as files in a work folder), and unit tests with a stand-in helper
+      — claimed: claude, branch `feature/r3.14-camoufox-backend`
+- [x] The website tools' page reads (navigate, evaluate, screenshot, network and console capture)
+      behind one browser seam (`PageConn`/`WebBackend` in `web_common.rs`), so `web_site_open`,
+      `web_site_capture` and `web_page_states_capture` run on Camoufox when it is installed
+      (`auto`, the default) or set in config.toml (`engines.web_browser`); live open → capture →
+      close on a local page with Camoufox 156.0.1, evidence naming the camoufox engine and a
+      clean teardown — claimed: claude, branch `feature/r3.14-camoufox-backend`
+- [ ] The generic browser tools (`web_page_*` in browser_tools.rs) on the same seam, so they can
+      inspect a Camoufox site too
+- [ ] Settings UI for `engines.web_browser` (config.toml only so far)
+- [ ] Live runs against real sites behind anti-bot walls with Camoufox, and the success
+      comparison against the Chromium path; record results in tool-status.md
 
 ---
 
