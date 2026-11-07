@@ -280,17 +280,24 @@ const LOG_MAX: u64 = 512 * 1024;
 /// panics, which would otherwise vanish with the window.
 fn log_to_file() {
     use std::io::Write as _;
-    struct FileLog(craft_anything_platform::sync::Mutex<Option<std::fs::File>>);
+    struct FileLog {
+        file: craft_anything_platform::sync::Mutex<Option<std::fs::File>>,
+        max: log::LevelFilter,
+    }
     impl log::Log for FileLog {
         fn enabled(&self, m: &log::Metadata<'_>) -> bool {
-            m.level() <= log::Level::Warn || (m.level() <= log::Level::Info && m.target().starts_with("craft_anything"))
+            // The usual file keeps warnings and our own progress. With RUST_LOG set higher
+            // (trace is in the start script) everything up to it goes in, winit and eframe's
+            // frame-scheduler traces included — that is how the next frozen window gets diagnosed.
+            let verbose = self.max >= log::LevelFilter::Debug;
+            m.level() <= self.max && (verbose || m.level() <= log::Level::Warn || (m.level() <= log::Level::Info && m.target().starts_with("craft_anything")))
         }
         fn log(&self, r: &log::Record<'_>) {
             if !self.enabled(r.metadata()) {
                 return;
             }
             let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-            if let Ok(mut f) = self.0.lock()
+            if let Ok(mut f) = self.file.lock()
                 && let Some(f) = f.as_mut()
             {
                 let _ = writeln!(f, "{at} [{}] {}: {}", r.level(), r.target(), r.args());
@@ -303,8 +310,9 @@ fn log_to_file() {
     let _ = std::fs::create_dir_all(&dir);
     let fresh = std::fs::metadata(&path).is_ok_and(|m| m.len() > LOG_MAX);
     let file = std::fs::OpenOptions::new().create(true).append(!fresh).write(true).truncate(fresh).open(&path).ok();
-    if log::set_logger(Box::leak(Box::new(FileLog(craft_anything_platform::sync::Mutex::new(file))))).is_ok() {
-        log::set_max_level(log::LevelFilter::Info);
+    let max = log_level_from_env();
+    if log::set_logger(Box::leak(Box::new(FileLog { file: craft_anything_platform::sync::Mutex::new(file), max }))).is_ok() {
+        log::set_max_level(max);
     }
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -312,6 +320,63 @@ fn log_to_file() {
         default_hook(info);
     }));
     craft_anything_platform::sync::start_watchdog(craft_anything_engine::settings::config_dir().join("logs"));
+}
+
+/// The level one `RUST_LOG` segment asks for: a bare word (`trace`) or a `module=level` pair's
+/// level. Only the first segment is read (per-module levels are beyond what the file needs).
+/// `None` for anything unrecognized: the caller keeps the default.
+fn parse_log_level(s: &str) -> Option<log::LevelFilter> {
+    let first = s.split(',').next().unwrap_or_default();
+    let word = match first.split_once('=') {
+        Some((_, level)) => level,
+        None => first,
+    };
+    match word.trim().to_ascii_lowercase().as_str() {
+        "trace" => Some(log::LevelFilter::Trace),
+        "debug" => Some(log::LevelFilter::Debug),
+        "info" => Some(log::LevelFilter::Info),
+        "warn" => Some(log::LevelFilter::Warn),
+        "error" => Some(log::LevelFilter::Error),
+        "off" => Some(log::LevelFilter::Off),
+        _ => None,
+    }
+}
+
+/// What RUST_LOG says to keep, or warnings and errors plus our own progress (the file's usual
+/// content) when it says nothing we understand.
+fn log_level_from_env() -> log::LevelFilter {
+    std::env::var("RUST_LOG").ok().as_deref().and_then(parse_log_level).unwrap_or(log::LevelFilter::Info)
+}
+
+#[cfg(test)]
+mod log_tests {
+    use super::*;
+
+    #[test]
+    fn a_bare_word_sets_the_level() {
+        assert_eq!(parse_log_level("trace"), Some(log::LevelFilter::Trace));
+        assert_eq!(parse_log_level("Warn"), Some(log::LevelFilter::Warn));
+        assert_eq!(parse_log_level("off"), Some(log::LevelFilter::Off));
+    }
+
+    #[test]
+    fn a_module_level_pair_takes_its_level() {
+        assert_eq!(parse_log_level("winit=trace"), Some(log::LevelFilter::Trace));
+        assert_eq!(parse_log_level("craft_anything=debug"), Some(log::LevelFilter::Debug));
+    }
+
+    #[test]
+    fn the_first_segment_wins() {
+        assert_eq!(parse_log_level("info,foo=trace"), Some(log::LevelFilter::Info));
+    }
+
+    #[test]
+    fn an_unrecognized_value_falls_back_to_the_default() {
+        assert_eq!(parse_log_level("verbose"), None);
+        assert_eq!(parse_log_level(""), None);
+        assert_eq!(parse_log_level("="), None);
+        assert_eq!(log_level_from_env(), log_level_from_env()); // reading it twice is stable
+    }
 }
 
 #[cfg(test)]

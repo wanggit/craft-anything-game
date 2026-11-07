@@ -95,5 +95,8 @@ panic = "abort"
 
 # wgpu-hal with a Metal shader-language probe (Craft Anything #742; upstream wgpu #10687).
 # Remove this once the upstream wgpu release picks a Metal version the compiler accepts. See vendor/wgpu-hal/CRAFT_ANYTHING.md.
+# eframe that keeps a stale repaint request scheduling instead of dropping it (a dropped last
+# request froze the window for 48 minutes on 2026-11-07). See vendor/eframe/CRAFT_ANYTHING.md.
 [patch.crates-io]
 wgpu-hal = { path = "vendor/wgpu-hal" }
+eframe = { path = "vendor/eframe" }

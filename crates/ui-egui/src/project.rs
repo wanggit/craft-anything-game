@@ -666,6 +666,9 @@ fn checklist(ui: &mut Ui, steps: &[PlanStep], t: &Tokens, began: Option<std::tim
                 if let Some(b) = began {
                     ui.label(RichText::new(crate::usage::duration_words(b.elapsed())).font(theme::mono(12.0)).color(t.text_faint));
                     ui.add(crate::widgets::Spinner::new().size(12.0).color(t.accent));
+                    // The clock ticks every second: frames must keep coming (the watchdog acts
+                    // if they stop — 2026-11-07 this clock froze at 26m 48s while a build worked).
+                    crate::watchdog::want_tick();
                     ui.ctx().request_repaint_after(std::time::Duration::from_secs(1));
                 }
                 ui.label(
