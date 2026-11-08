@@ -30,6 +30,9 @@ pub fn phone_states_dir(width: u32) -> String {
 /// for as its own page (or cut out of the page's screenshots).
 pub const FOCUS_DIR: &str = "focus";
 
+/// The focused part's own saved files, inside `capture/<focus>/` (R2.12).
+pub const RESOURCES_DIR: &str = "resources";
+
 /// The embedded view the focus points at in a capture's `embeds` (R2.11): the one with the
 /// focus's element id, else the biggest the capture found.
 pub fn pick_focus_embed<'a>(capture: &'a Value, focus: &Focus) -> Option<&'a Value> {
@@ -63,6 +66,18 @@ fn focus_brief(focus: &Focus) -> String {
         "The rebuild is the {} alone — the person asked for just that part, and the page around it is out of scope: don't rebuild it and don't compare yourself to it. The {}'s own capture is in capture/{}/ (screenshot-<width>.png at each width and its own capture.json; open every picture with the Read tool before you plan). Match those pictures closely: the same layout and proportions, sizes, colours, fonts, and where every control sits. The rebuild is the {} itself, filling the window. The checks compare it with capture/{}/ only.",
         focus.what, focus.what, FOCUS_DIR, focus.what, FOCUS_DIR
     )
+}
+
+/// What the builder is told when the focused part's own files were saved (R2.12): the game's
+/// resources are its own to use as they are, and its code is rewritten keeping its meaning.
+fn focus_resources_brief(focus: &Focus, ws: &Workspace) -> Option<String> {
+    if !ws.capture_dir().join(FOCUS_DIR).join(RESOURCES_DIR).join("resources.json").is_file() {
+        return None;
+    }
+    Some(format!(
+        "The {}'s own files (its scripts, data, pictures, sounds) were saved into capture/{}/resources/: resources.json maps every address the browser loaded to its bytes under files/. Copy the ones it uses into app/ and use them as they are. Rewrite its code in your own code, keeping its meaning — the same formulas, constants, timings and states — never pasting the original's text. Read bundles with js_sources_restore and js_app_map; data files open as they are.",
+        focus.what, FOCUS_DIR
+    ))
 }
 
 /// The phone width among the widths compared (the narrowest under 768 px), if any.
@@ -209,9 +224,12 @@ impl TargetKind for WebsiteKind {
 
     fn brief_sections(&self, cx: &BriefCx) -> Vec<String> {
         // A focused rebuild (R2.11) is only about its part: the page's other pages and menus are
-        // out of scope and never studied, so only the focus section is said.
+        // out of scope and never studied, so only the focus section is said (with what its own
+        // files add, when they were saved — R2.12).
         if let Some(focus) = &cx.ws.manifest.focus {
-            return vec![focus_brief(focus)];
+            let mut out = vec![focus_brief(focus)];
+            out.extend(focus_resources_brief(focus, cx.ws));
+            return out;
         }
         let mut out = Vec::new();
         let routes = routes(cx.ws);
@@ -234,7 +252,10 @@ impl TargetKind for WebsiteKind {
     /// A builder that carries on its session sees only this: where the focused part's capture is
     /// (R2.11), in case it was brought by a re-study since the brief.
     fn follow_up_sections(&self, cx: &BriefCx) -> Vec<String> {
-        cx.ws.manifest.focus.as_ref().map(focus_brief).into_iter().collect()
+        let Some(focus) = &cx.ws.manifest.focus else { return Vec::new() };
+        let mut out = vec![focus_brief(focus)];
+        out.extend(focus_resources_brief(focus, cx.ws));
+        out
     }
 
     fn checks(&self, ws: &Workspace) -> Vec<Box<dyn Check>> {
@@ -1045,6 +1066,33 @@ mod tests {
         let half = d.path().join("noise-half.png");
         std::fs::write(&half, NoiseMask { tile: 16, cols: 4, rows: 4, bits: (0..16).map(|i| i < 6).collect() }.to_png().unwrap()).unwrap();
         assert!(!mask_hides_everything(&half, &original).unwrap(), "most of the picture still compares");
+    }
+
+    /// R2.12: with the focused part's own files saved, the brief lets the builder use them as
+    /// they are and rewrite the code keeping its meaning; without them nothing says so, and the
+    /// base focus brief stays exactly as it was.
+    #[test]
+    fn the_focus_brief_offers_the_saved_resources() {
+        let d = tempfile::tempdir().unwrap();
+        let mut ws = Workspace::create(d.path(), "Game", "Clone the game, only the game area", TargetRef::Website { url: "https://x/".into() }).unwrap();
+        ws.manifest.focus = Some(Focus { what: "the game area".into(), element_id: None });
+        let focus = Focus { what: "the game area".into(), element_id: None };
+        assert!(!focus_brief(&focus).contains("resources"), "the base focus brief is unchanged");
+        assert!(focus_resources_brief(&focus, &ws).is_none(), "nothing saved yet: nothing said");
+        let res = ws.capture_dir().join(FOCUS_DIR).join(RESOURCES_DIR);
+        std::fs::create_dir_all(&res).unwrap();
+        std::fs::write(res.join("resources.json"), b"{}").unwrap();
+        let text = focus_resources_brief(&focus, &ws).unwrap();
+        for said in [
+            "capture/focus/resources/",
+            "use them as they are",
+            "Rewrite its code in your own code, keeping its meaning",
+            "the same formulas, constants, timings and states",
+            "never pasting the original's text",
+            "js_sources_restore",
+        ] {
+            assert!(text.contains(said), "{said} missing from {text}");
+        }
     }
 
     /// R2.11: the refine note names the part's own capture for a focused rebuild (one pair to

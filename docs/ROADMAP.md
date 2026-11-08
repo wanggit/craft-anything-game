@@ -85,6 +85,7 @@ Issues are ranked by people affected and how badly, after leaving out what's alr
 | 3 | R2.7, R2.8 | — | Small gaps left in finished work |
 | 3 | R2.9 Everyday use, R2.10 Pinned builds | — | Open to anyone at any time; most lines stand alone |
 | 3 | R2.11 Scoped rebuilds | — | A live game rebuild was checked against the site's chrome, not the game |
+| 3 | R2.12 Game rebuilds get the game's own code and resources | R2.11 *(soft)* | Screenshots leave a builder nothing of how a game plays; the capture browser already loaded every byte |
 | 3 | R1.5 | — | Small leftovers |
 | Any | M3: R3.3, R3.9, R3.11, R3.14 | — | Open lane |
 | Later | R4.1 macOS CLI, R4.2 Managed tier | **decision** | Not before M5 |
@@ -818,6 +819,32 @@ ignore must be data that the study and the check follow.
       photographed seconds after the page settles is its loading screen, which the builder then
       chases (seen on a real embedded game)
       — claimed: claude, branch feature/r2.11-focus-settle; PR #5
+
+---
+
+### R2.12 Game rebuilds get the game's own code and resources
+Owner: open · Status: in progress
+A web game rebuilt from screenshots alone plays wrong: the formulas, timings and level data live in
+its scripts and data files, which the capture keeps only as URLs. The capture browser already loads
+every byte the game serves — through the browser's own network stack, iframe or not — so a focused
+game capture can keep them. Decided 2026-11-08: the game's own resources may be reused in the
+rebuild as they are; the code is rewritten keeping its meaning (the same formulas, constants,
+timings and states, in the builder's own code); a 1 GiB budget; only for game rebuilds (a focused
+embed), only the game body.
+- [x] The capture browser keeps the bytes: a new Deep-mode `web_resources_save` writes every
+      response body the open page loaded (all frames) to files with a `resources.json` manifest
+      (url → file, type, size, sha256, frame, how it was got), deduped by URL and content hash
+      under a 1 GiB budget (scripts, WASM and data kept before media on overflow; the manifest
+      says what was dropped)
+      — claimed: claude, branch feature/r2.12-game-resources; PR #8
+- [x] The focused game capture saves the game body's resources (capture/focus/resources/) in the
+      study, and the focused brief says: reuse the resources as they are in app/, rewrite the code
+      keeping its meaning (never paste the original's text), and how to read what (bundles through
+      js_sources_restore / js_app_map, data files directly); a project without a focus keeps every
+      word of its brief and refine note as they are (pinned by tests)
+      — claimed: claude, branch feature/r2.12-game-resources; PR #8
+- [ ] A focused rebuild of a real embedded game runs live end to end with resources (study →
+      build → check), and what the likeness bar reaches now — paired with R2.11's live line
 
 ---
 

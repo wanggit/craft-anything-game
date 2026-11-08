@@ -48,6 +48,17 @@ pub fn specs() -> Vec<ToolSpec> {
             web_site_capture,
         ),
         spec(
+            "web_resources_save",
+            "Save the page's own files",
+            "Save the bytes of everything the open page loaded — scripts, stylesheets, fonts, images, sounds, data files, WASM, from every frame, iframes included — into a new folder, exactly as the browser received them: files/<host>/<path> plus resources.json mapping each address to its file, size, sha256 and the frame it belongs to. Up to budget_bytes is kept (default 1 GiB): scripts, WASM and data are saved before media, the biggest media is dropped first when the budget runs out, and the manifest lists what was dropped and why. Needs Deep mode: these are the original's own code and content.",
+            "Save the game's own files (code, pictures, sounds, data) that the open page loaded, so a rebuild can use them.",
+            Toolset::Browser,
+            Effects::EVIDENCE.union(Effects::WRITES_FILESYSTEM).union(Effects::ACCESSES_NETWORK).union(Effects::CARRIES_TARGET_CONTENT),
+            Requires::AnyEngine(&["camoufox", "chromium"]),
+            schema_of::<ResourcesSaveParams>,
+            web_resources_save,
+        ),
+        spec(
             "web_page_states_capture",
             "Capture menus, dialogs and tabs",
             "On the open website, open up to max_states of its visible menus, pop-ups, tabs and collapsed sections (aria-expanded, aria-haspopup, unselected tabs, <summary>; never form controls or submit buttons) one at a time: click it, take a screenshot, record what changed (expanded, a dialog appeared, the tab or the address changed), then put the page back. Writes state-<n>.png and states.json into a new folder. Clicking runs the site's own code, so it needs your approval.",
@@ -1295,6 +1306,351 @@ fn block_line(blk: &Value) -> String {
 }
 
 // ---------------------------------------------------------------------------------------------
+// web_resources_save
+
+/// Save the bytes of what the open page loaded (R2.12), so a rebuild can use the target's own
+/// scripts, data and art instead of guessing at them from screenshots. Deep-mode only (it is not
+/// in [`crate::clean_room::TOOLS`]): the bytes are the original's code and content.
+pub const RESOURCES_SAVE_TOOL: &str = "web_resources_save";
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ResourcesSaveParams {
+    /// Absolute path of a folder that does not exist yet; the resources are written there.
+    pub output_directory: String,
+    /// Total bytes to keep (1 MiB to 4 GiB, default 1 GiB). Scripts, WASM and data are kept
+    /// before media, and the biggest media is dropped first when the budget runs out.
+    #[serde(default = "d_budget")]
+    pub budget_bytes: u64,
+    #[serde(default = "d_timeout")]
+    pub timeout_secs: u64,
+}
+
+fn d_budget() -> u64 {
+    1 << 30
+}
+
+/// One response body [`plan_kept`] keeps (R2.12) and where it goes.
+struct Kept {
+    url: String,
+    kind: String,
+    status: u64,
+    frame: String,
+    bytes: u64,
+    sha256: String,
+    how: String,
+    /// Where the bytes are now (the browser's work file).
+    file: String,
+    /// Where they are saved (`files/<host>/<path>`).
+    rel: String,
+    /// The `rel` of the first body with the same sha256, when this is a second copy of it.
+    duplicate_of: Option<String>,
+}
+
+/// A response body that isn't saved (R2.12) and why: `budget`, `too large`, `no body`, `inline`
+/// (a data:/blob: address has no file to fetch), `many`, `unreadable` or `missing file`.
+struct Dropped {
+    url: String,
+    kind: String,
+    bytes: Option<u64>,
+    reason: &'static str,
+}
+
+fn web_resources_save(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, ToolError> {
+    let p: ResourcesSaveParams = parse_params(params)?;
+    if !(1 << 20..=4 << 30).contains(&p.budget_bytes) {
+        return Err(ToolError::invalid("budget_bytes must be between 1 MiB and 4 GiB"));
+    }
+    let dl = deadline(ctx, p.timeout_secs.max(30))?;
+    let site = open_site(ctx, &dl)?;
+    let mut conn = site.backend.page(&dl)?;
+    let page = conn.as_mut();
+    let out = match create_absent_dir(&p.output_directory) {
+        Ok(out) => out,
+        Err(e) => {
+            page.finish(&dl);
+            return Err(e);
+        }
+    };
+    let collected = page.collect_bodies(p.budget_bytes, &dl);
+    page.finish(&dl);
+    let collected = collected?;
+    let items = collected.get("items").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
+    let skipped = collected.get("skipped").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
+    let total = collected.get("total").and_then(Value::as_u64).unwrap_or(0);
+    let (kept, mut dropped, _) = plan_kept(items, skipped, p.budget_bytes);
+    // Move what was kept into place (one copy per content hash; the rest of the work files go).
+    let mut kept_bytes = 0u64;
+    let mut files = 0u64;
+    for k in &kept {
+        let src = Path::new(&k.file);
+        if k.duplicate_of.is_some() {
+            let _ = std::fs::remove_file(src);
+            continue;
+        }
+        let dest = out.join(&k.rel);
+        let moved = match dest.parent() {
+            Some(parent) => std::fs::create_dir_all(parent).and_then(|()| std::fs::rename(src, &dest)).or_else(|_| std::fs::copy(src, &dest).map(|_| ())),
+            None => std::fs::rename(src, &dest).or_else(|_| std::fs::copy(src, &dest).map(|_| ())),
+        };
+        match moved {
+            Ok(()) => {
+                kept_bytes = kept_bytes.saturating_add(k.bytes);
+                files += 1;
+            }
+            Err(_) => dropped.push(Dropped { url: k.url.clone(), kind: k.kind.clone(), bytes: Some(k.bytes), reason: "missing file" }),
+        }
+    }
+    let manifest_items: Vec<Value> = kept
+        .iter()
+        .map(|k| {
+            let mut m = json!({
+                "url": k.url, "file": k.rel, "type": k.kind, "status": k.status, "frame": k.frame,
+                "bytes": k.bytes, "sha256": k.sha256, "how": k.how
+            });
+            if let (Value::Object(o), Some(d)) = (&mut m, &k.duplicate_of) {
+                o.insert("duplicate_of".into(), json!(d));
+            }
+            m
+        })
+        .collect();
+    let manifest_dropped: Vec<Value> = dropped
+        .iter()
+        .map(|d| {
+            let mut m = json!({"url": d.url, "type": d.kind, "reason": d.reason});
+            if let (Value::Object(o), Some(b)) = (&mut m, d.bytes) {
+                o.insert("bytes".into(), json!(b));
+            }
+            m
+        })
+        .collect();
+    let manifest = json!({
+        "version": 1,
+        "budget_bytes": p.budget_bytes,
+        "kept_bytes": kept_bytes,
+        "items": manifest_items,
+        "dropped": manifest_dropped,
+    });
+    let manifest_json = serde_json::to_vec_pretty(&manifest).map_err(|e| ToolError::internal(e.to_string()))?;
+    write_new_file(&out, &["resources.json".into()], &manifest_json).map_err(ToolError::invalid)?;
+    let readme = resources_readme(&kept, &dropped, kept_bytes, p.budget_bytes);
+    write_new_file(&out, &["README.md".into()], readme.as_bytes()).map_err(ToolError::invalid)?;
+
+    let url = site.url.lock().map(|u| u.clone()).unwrap_or_default();
+    let shown = shown_url(&url);
+    let summary = format!(
+        "Saved {files} file(s) ({kept_bytes} bytes) from {} response(s) of {shown} into {}{}.",
+        kept.len(),
+        out.display(),
+        if dropped.is_empty() { String::new() } else { format!("; {} not saved (resources.json says why)", dropped.len()) }
+    );
+    let mut reasons: std::collections::BTreeMap<&'static str, u64> = std::collections::BTreeMap::new();
+    for d in &dropped {
+        *reasons.entry(d.reason).or_insert(0) += 1;
+    }
+    let reasons = reasons.into_iter().map(|(r, n)| format!("{n} {r}")).collect::<Vec<_>>().join(", ");
+    let ev = EvidenceBuilder::new(
+        RESOURCES_SAVE_TOOL,
+        Subject { kind: "website".into(), sha256: None, name: Some(shown.clone()) },
+        site.env(ctx.session.clean_room()),
+    )
+    .params(json!({"budget_bytes": p.budget_bytes}))
+    .result(json!({
+        "output_directory": out.display().to_string(),
+        "url": url,
+        "counts": {"files": files, "items": kept.len(), "dropped": dropped.len()},
+        "kept_bytes": kept_bytes,
+        "manifest": "resources.json",
+    }))
+    .summary(summary)
+    .confidence(Confidence::Observed)
+    .authority(Authority::OurRun)
+    .limitations((!dropped.is_empty()).then(|| {
+        Limitation::new("resources_dropped", format!("{} response(s) weren't saved ({reasons}); resources.json lists each one and why.", dropped.len()))
+    }))
+    .limitations((total > 0 && total as usize > items.len() + skipped.len()).then(|| {
+        Limitation::new(
+            "resources_incomplete",
+            format!("The page loaded {total} responses; {} were considered (the browser's tracker is bounded).", items.len() + skipped.len()),
+        )
+    }))
+    .coverage(Coverage::complete(files))
+    .location(Location::new("url", shown))
+    .location(Location::new("path", out.display().to_string()))
+    .build()?;
+    Ok(ToolOutput::evidence(ev))
+}
+
+/// What to keep of the bodies the browser produced (R2.12): code and data in load order first,
+/// then media smallest first (so a full budget drops the biggest media), one copy of what hashes
+/// the same, all under `budget` bytes. What isn't kept is dropped with its reason, never guessed.
+fn plan_kept(items: &[Value], skipped: &[Value], budget: u64) -> (Vec<Kept>, Vec<Dropped>, u64) {
+    let mut dropped: Vec<Dropped> = Vec::new();
+    for s in skipped {
+        let reason = match s.get("reason").and_then(Value::as_str).unwrap_or_default() {
+            "no body" => "no body",
+            "too large" => "too large",
+            "inline" => "inline",
+            _ => "unavailable",
+        };
+        dropped.push(Dropped {
+            url: s.get("url").and_then(Value::as_str).unwrap_or_default().to_string(),
+            kind: s.get("type").and_then(Value::as_str).unwrap_or_default().to_string(),
+            bytes: s.get("bytes").and_then(Value::as_u64),
+            reason,
+        });
+    }
+    let mut parsed: Vec<Kept> = Vec::new();
+    for it in items {
+        let (Some(url), Some(file), Some(sha)) =
+            (it.get("url").and_then(Value::as_str), it.get("file").and_then(Value::as_str), it.get("sha256").and_then(Value::as_str))
+        else {
+            dropped.push(Dropped {
+                url: it.get("url").and_then(Value::as_str).unwrap_or_default().to_string(),
+                kind: String::new(),
+                bytes: it.get("bytes").and_then(Value::as_u64),
+                reason: "unreadable",
+            });
+            continue;
+        };
+        parsed.push(Kept {
+            url: url.to_string(),
+            kind: it.get("type").and_then(Value::as_str).unwrap_or_default().to_string(),
+            status: it.get("status").and_then(Value::as_u64).unwrap_or(0),
+            frame: it.get("frame").and_then(Value::as_str).unwrap_or_default().to_string(),
+            bytes: it.get("bytes").and_then(Value::as_u64).unwrap_or(0),
+            sha256: sha.to_string(),
+            how: it.get("how").and_then(Value::as_str).unwrap_or_default().to_string(),
+            file: file.to_string(),
+            rel: String::new(),
+            duplicate_of: None,
+        });
+    }
+    // Code and data in load order, media smallest first: a full budget drops the biggest media.
+    let is_media = |k: &Kept| matches!(k.kind.as_str(), "Image" | "Media" | "TextTrack");
+    parsed.sort_by_key(|k| (is_media(k), if is_media(k) { k.bytes } else { 0 }));
+    let mut kept: Vec<Kept> = Vec::new();
+    let mut used_rel: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut by_sha: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut used_bytes = 0u64;
+    for mut k in parsed {
+        if !k.sha256.is_empty()
+            && let Some(rel) = by_sha.get(&k.sha256)
+        {
+            k.rel = rel.clone();
+            k.duplicate_of = Some(rel.clone());
+            kept.push(k);
+            continue;
+        }
+        if used_bytes.saturating_add(k.bytes) > budget {
+            dropped.push(Dropped { url: k.url, kind: k.kind, bytes: Some(k.bytes), reason: "budget" });
+            continue;
+        }
+        let mut rel = safe_rel_path(&k.url);
+        // A file name another body already took (case-insensitively: some disks fold case).
+        if used_rel.contains_key(&rel.to_lowercase()) {
+            let hashed = hash_suffix(&rel, &k.sha256);
+            let mut alt = hashed.clone();
+            let mut n = 2;
+            while used_rel.contains_key(&alt.to_lowercase()) {
+                alt = format!("{hashed}-{n}");
+                n += 1;
+            }
+            rel = alt;
+        }
+        used_rel.insert(rel.to_lowercase(), k.sha256.clone());
+        if !k.sha256.is_empty() {
+            by_sha.insert(k.sha256.clone(), rel.clone());
+        }
+        used_bytes = used_bytes.saturating_add(k.bytes);
+        k.rel = rel;
+        kept.push(k);
+    }
+    (kept, dropped, used_bytes)
+}
+
+/// `files/<host>/<path>` for a URL, safe on every filesystem: control characters and the names
+/// Windows refuses are replaced, `.` and `..` segments dropped, a query string becomes a hash
+/// suffix (so `a.js?v=2` and `a.js?v=3` are different files), and long segments are cut with a
+/// hash. The full URL stays in the manifest.
+fn safe_rel_path(url: &str) -> String {
+    let (rest, query) = match url.split_once('?') {
+        Some((r, q)) => (r, Some(q)),
+        None => (url, None),
+    };
+    let after_scheme = rest.split_once("://").map(|(_, r)| r).unwrap_or(rest);
+    let (netloc, path) = match after_scheme.split_once('/') {
+        Some((n, p)) => (n, p),
+        None => (after_scheme, ""),
+    };
+    let host = sanitize_seg(&netloc.replace(':', "_"));
+    let mut segs: Vec<String> = path.split('/').filter(|s| !s.is_empty() && *s != "." && *s != "..").map(sanitize_seg).collect();
+    if segs.is_empty() {
+        segs.push("index".to_string());
+    }
+    if let Some(q) = query.filter(|q| !q.is_empty()) {
+        let qh = &sha256_hex(q.as_bytes())[..8];
+        let last = segs.pop().unwrap_or_default();
+        segs.push(match last.rsplit_once('.') {
+            Some((stem, ext)) if !stem.is_empty() => format!("{stem}-q{qh}.{ext}"),
+            _ => format!("{last}-q{qh}"),
+        });
+    }
+    format!("files/{host}/{}", segs.join("/"))
+}
+
+/// One path segment made safe: what Windows refuses (`<>:"|?*\`, control characters, reserved
+/// names, trailing dots and spaces) is replaced, and a long one is cut with a hash of the original.
+fn sanitize_seg(seg: &str) -> String {
+    const RESERVED: &[&str] = &[
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6",
+        "LPT7", "LPT8", "LPT9",
+    ];
+    let mut s: String = seg.chars().map(|c| if c.is_control() || "<>:\"|?*\\".contains(c) { '_' } else { c }).collect();
+    while s.ends_with('.') || s.ends_with(' ') {
+        s.pop();
+    }
+    if s.is_empty() {
+        s.push('_');
+    }
+    let stem = s.split('.').next().unwrap_or_default().to_ascii_uppercase();
+    if RESERVED.contains(&stem.as_str()) {
+        s.insert(0, '_');
+    }
+    if s.chars().count() > 120 {
+        let h8 = &sha256_hex(seg.as_bytes())[..8];
+        s = format!("{}-{h8}", s.chars().take(80).collect::<String>());
+    }
+    s
+}
+
+/// Put `-{sha8}` before the file extension: two different bodies that map to one file name.
+fn hash_suffix(rel: &str, sha: &str) -> String {
+    let h8 = if sha.is_empty() { "x".repeat(8) } else { sha.chars().take(8).collect() };
+    match rel.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => format!("{stem}-{h8}.{ext}"),
+        _ => format!("{rel}-{h8}"),
+    }
+}
+
+/// The resources folder's README: what these files are and how the rebuild reads them.
+fn resources_readme(kept: &[Kept], dropped: &[Dropped], kept_bytes: u64, budget: u64) -> String {
+    let mut md = String::new();
+    md.push_str("# The page's own files\n\n");
+    md.push_str("Everything the browser downloaded to show this page, as it arrived: the rebuild may\n");
+    md.push_str("copy these into its app as they are.\n\n");
+    md.push_str(&format!(
+        "- `resources.json` maps every loaded address to its file under `files/<host>/<path>`, with its type, size, sha256 and the frame that asked for it. Entries that share a sha256 are the same bytes (`duplicate_of`).\n- {} file(s) kept, {kept_bytes} bytes (budget {budget}).\n",
+        kept.iter().filter(|k| k.duplicate_of.is_none()).count()
+    ));
+    if !dropped.is_empty() {
+        md.push_str(&format!("- {} response(s) not saved: see `dropped` in `resources.json` for each one and why.\n", dropped.len()));
+    }
+    md.push_str("\nBundles can be read as code with `js_sources_restore` and `js_app_map`; `.json`, `.wasm` and other data files open as they are.\n");
+    md
+}
+
+// ---------------------------------------------------------------------------------------------
 // web_site_close
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
@@ -1310,6 +1666,93 @@ fn web_site_close(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, ToolEr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// R2.12: one body as the helper reports it.
+    fn body(url: &str, kind: &str, bytes: u64, sha: &str) -> Value {
+        json!({"url": url, "type": kind, "status": 200, "frame": "https://a.test/", "length": bytes,
+               "file": "/work/body.bin", "bytes": bytes, "sha256": sha, "how": "body"})
+    }
+
+    /// R2.12: code and data are kept before media, and a full budget drops the biggest media.
+    #[test]
+    fn the_budget_keeps_code_and_data_and_drops_biggest_media() {
+        let items = vec![
+            body("https://a.test/game.js", "Script", 1 << 20, "s1"),
+            body("https://a.test/level.bin", "Fetch", 200 << 20, "f1"),
+            body("https://cdn.test/big.png", "Image", 900 << 20, "i1"),
+            body("https://cdn.test/small.png", "Image", 10 << 20, "i2"),
+        ];
+        let (kept, dropped, planned) = plan_kept(&items, &[], 500 << 20);
+        assert_eq!(planned, 211 << 20);
+        let urls: Vec<&str> = kept.iter().map(|k| k.url.as_str()).collect();
+        assert_eq!(urls, ["https://a.test/game.js", "https://a.test/level.bin", "https://cdn.test/small.png"]);
+        assert_eq!(dropped.len(), 1);
+        assert_eq!(dropped[0].reason, "budget");
+        assert_eq!(dropped[0].url, "https://cdn.test/big.png");
+    }
+
+    /// R2.12: the same bytes are kept once; the second address points at the first's file.
+    #[test]
+    fn one_copy_of_what_hashes_the_same() {
+        let items = vec![
+            body("https://a.test/a.png", "Image", 10, "same"),
+            body("https://cdn.test/b.png", "Image", 10, "same"),
+            body("https://cdn.test/c.png", "Image", 10, "other"),
+        ];
+        let (kept, dropped, planned) = plan_kept(&items, &[], 1000);
+        assert_eq!(planned, 20, "one copy counts once");
+        assert!(dropped.is_empty());
+        assert_eq!(kept[1].duplicate_of.as_deref(), Some(kept[0].rel.as_str()));
+        assert_eq!(kept[1].rel, kept[0].rel);
+        assert!(kept[2].duplicate_of.is_none());
+    }
+
+    /// R2.12: bodies the helper couldn't save arrive as dropped with their reason.
+    #[test]
+    fn skipped_bodies_are_dropped_with_their_reason() {
+        let skipped = vec![
+            json!({"url": "data:text/plain,hi", "type": "Other", "reason": "inline"}),
+            json!({"url": "https://a.test/x.js", "type": "Script", "reason": "no body"}),
+            json!({"url": "https://a.test/huge.bin", "type": "Fetch", "reason": "too large", "bytes": 9}),
+        ];
+        let (kept, dropped, _) = plan_kept(&[], &skipped, 100);
+        assert!(kept.is_empty());
+        let reasons: Vec<&str> = dropped.iter().map(|d| d.reason).collect();
+        assert_eq!(reasons, ["inline", "no body", "too large"]);
+        assert_eq!(dropped[2].bytes, Some(9));
+    }
+
+    /// R2.12: unreadable entries never panic the save; they land in dropped.
+    #[test]
+    fn unreadable_entries_are_dropped_not_guessed() {
+        let (kept, dropped, _) = plan_kept(&[json!({"url": "https://a.test/x"})], &[], 100);
+        assert!(kept.is_empty());
+        assert_eq!(dropped[0].reason, "unreadable");
+    }
+
+    /// R2.12: file names are safe everywhere and two bodies that map to one name stay apart.
+    #[test]
+    fn resource_file_names_are_safe_and_distinct() {
+        assert_eq!(safe_rel_path("https://a.test/game.js"), "files/a.test/game.js");
+        assert_eq!(safe_rel_path("https://a.test/"), "files/a.test/index");
+        // A query string is a hash suffix, so cache-busted variants are different files.
+        let v2 = safe_rel_path("https://a.test/a.js?v=2");
+        let v3 = safe_rel_path("https://a.test/a.js?v=3");
+        assert!(v2.starts_with("files/a.test/a-q") && v2.ends_with(".js"), "{v2}");
+        assert_ne!(v2, v3);
+        // `..` segments are dropped (not resolved), so nothing climbs out of the folder.
+        assert_eq!(safe_rel_path("https://a.test/a/../../etc/passwd"), "files/a.test/a/etc/passwd");
+        // What Windows refuses is replaced, its reserved names included.
+        assert_eq!(safe_rel_path("https://a.test/x:y*z"), "files/a.test/x_y_z");
+        assert_eq!(safe_rel_path("https://a.test/CON/x"), "files/a.test/_CON/x");
+        assert_eq!(safe_rel_path("https://cdn.test:8443/x.png"), "files/cdn.test_8443/x.png");
+        // Two different bytes on one name (disks that fold case): the second is disambiguated.
+        let items = vec![body("https://a.test/A.png", "Image", 1, "one"), body("https://a.test/a.png", "Image", 2, "two")];
+        let (kept, dropped, _) = plan_kept(&items, &[], 100);
+        assert!(dropped.is_empty());
+        assert_ne!(kept[0].rel, kept[1].rel);
+        assert!(kept[1].rel.contains("two"), "{}", kept[1].rel);
+    }
 
     #[test]
     fn a_click_is_described_by_what_changed() {
