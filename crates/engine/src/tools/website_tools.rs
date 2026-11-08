@@ -754,6 +754,9 @@ fn web_site_capture(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, Tool
     } else if let (Value::Object(b), Ok(h)) = (&mut blueprint, site.health.lock()) {
         b.insert("health".into(), h.clone());
     }
+    // An embedded view (a game) that shows as one colour in every screenshot didn't render: say
+    // so instead of passing its blank box off as what the page shows (R2.11).
+    let unrendered = unrendered_embeds(&mut blueprint, &out);
 
     let url = blueprint.get("url").and_then(Value::as_str).unwrap_or_default().to_string();
     let shown = shown_url(&url);
@@ -774,6 +777,11 @@ fn web_site_capture(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, Tool
         n("embeds"),
         out.display()
     );
+    let summary = if unrendered.is_empty() {
+        summary
+    } else {
+        format!("{summary} {} embedded view(s) show as one colour in the screenshots, so they didn't render (a game may need WebGL).", unrendered.len())
+    };
     let ev = EvidenceBuilder::new("web_site_capture", Subject { kind: "website".into(), sha256: None, name: Some(shown.clone()) }, site.env(ctx.session.clean_room()))
         .params(json!({"widths": p.widths, "max_height": p.max_height, "include_html": p.include_html, "noise_pass": p.noise_pass, "visitor_view": visitor}))
         .result(json!({
@@ -791,6 +799,16 @@ fn web_site_capture(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, Tool
         .confidence(Confidence::Observed)
         .authority(Authority::OurRun)
         .limitation(Limitation::new("one_state", "One state of the page: menus, dialogs and content behind interactions are not opened."))
+        .limitations((!unrendered.is_empty()).then(|| {
+            Limitation::new(
+                "embed_not_rendered",
+                format!(
+                    "{} embedded view(s) didn't render: their area is one colour in the screenshots ({}). A game may need WebGL; look at the pictures before trusting them.",
+                    unrendered.len(),
+                    unrendered.join(", ")
+                ),
+            )
+        }))
         .limitation(if visitor {
             Limitation::new("visitor_view", "Clean room: only what a visitor sees was kept (screenshots, visible text, measured layout and styles); not the page's HTML, CSS rules, scripts, requests or errors.")
         } else {
@@ -822,6 +840,9 @@ fn capture_into(ctx: &Ctx<'_>, page: &mut dyn PageConn, out: &Path, p: &CaptureP
     let mut blueprint = Value::Null;
     let mut layouts = Vec::new();
     let mut embeds: Vec<Value> = Vec::new();
+    // Whether this browser can draw at all: a game in an embed needs WebGL, and a browser without
+    // it photographs an error screen instead (R2.11). Unknown probes count as available.
+    let webgl = page.eval("!!document.createElement('canvas').getContext('webgl')", dl).ok().and_then(|v| v.as_bool()).unwrap_or(true);
     for (i, &w) in p.widths.iter().enumerate() {
         ctx.report(Some(i as f32 / p.widths.len() as f32), format!("Photographing the page at {w} px…"));
         page.set_viewport(w, 900, dl)?;
@@ -875,6 +896,7 @@ fn capture_into(ctx: &Ctx<'_>, page: &mut dyn PageConn, out: &Path, p: &CaptureP
     }
     if let Value::Object(b) = &mut blueprint {
         b.insert("layouts".into(), Value::Array(layouts));
+        b.insert("webgl".into(), json!(webgl));
         if !embeds.is_empty() {
             b.insert("embeds".into(), Value::Array(embeds));
         }
@@ -940,6 +962,75 @@ fn merge_frames(embeds: &mut Vec<Value>, frames: Vec<Value>, width: u32) {
             }
         }
     }
+}
+
+/// The embedded views that show as one colour at every width they showed at: they didn't render
+/// (a game may need WebGL this browser didn't give it). Each is marked `"rendered": false` in the
+/// blueprint, and one line naming it is returned for the capture's note (R2.11).
+fn unrendered_embeds(blueprint: &mut Value, out: &Path) -> Vec<String> {
+    let Some(embeds) = blueprint.get_mut("embeds").and_then(Value::as_array_mut) else { return Vec::new() };
+    let mut lines = Vec::new();
+    for e in embeds.iter_mut() {
+        let tag = e.get("tag").and_then(Value::as_str).unwrap_or("embed");
+        let title = e.get("title").and_then(Value::as_str).unwrap_or_default();
+        let id = e.get("id").and_then(Value::as_str).unwrap_or_default();
+        let name = if !title.is_empty() {
+            format!("{tag} \"{title}\"")
+        } else if !id.is_empty() {
+            format!("{tag} #{id}")
+        } else {
+            tag.to_string()
+        };
+        let boxes = e.get("boxes").and_then(Value::as_array).cloned().unwrap_or_default();
+        let (mut seen, mut blank) = (0u32, 0u32);
+        for b in &boxes {
+            let width = b.get("width").and_then(Value::as_u64).unwrap_or(0);
+            let num = |k: &str| b.get(k).and_then(Value::as_i64).unwrap_or(0);
+            if width == 0 || num("w") < 8 || num("h") < 8 {
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(out.join(format!("screenshot-{width}.png"))) else { continue };
+            let Ok(img) = web_common::decode_png(&bytes) else { continue };
+            // The box is in CSS pixels at that width; the screenshot can be scaled (R2.11).
+            let scale = f64::from(img.width) / width as f64;
+            let at = |k: &str| (num(k) as f64 * scale) as u32;
+            seen += 1;
+            if region_is_blank(&img, at("x"), at("y"), at("w"), at("h")) {
+                blank += 1;
+            }
+        }
+        if seen > 0 && blank == seen {
+            e["rendered"] = json!(false);
+            lines.push(name);
+        }
+    }
+    lines
+}
+
+/// Whether every pixel in the region is about the same brightness (nothing was drawn there).
+fn region_is_blank(img: &web_common::Image, x: u32, y: u32, w: u32, h: u32) -> bool {
+    let (x0, y0) = (x.min(img.width), y.min(img.height));
+    let (x1, y1) = (x.saturating_add(w).min(img.width), y.saturating_add(h).min(img.height));
+    if x1.saturating_sub(x0) < 4 || y1.saturating_sub(y0) < 4 {
+        return false;
+    }
+    let (mut n, mut sum, mut sum2) = (0u64, 0f64, 0f64);
+    for py in y0..y1 {
+        for px in x0..x1 {
+            let o = ((py as usize) * (img.width as usize) + (px as usize)) * 4;
+            if let Some(p) = img.rgba.get(o..o + 3) {
+                let l = 0.299 * f64::from(p[0]) + 0.587 * f64::from(p[1]) + 0.114 * f64::from(p[2]);
+                sum += l;
+                sum2 += l * l;
+                n += 1;
+            }
+        }
+    }
+    if n == 0 {
+        return false;
+    }
+    let mean = sum / n as f64;
+    (sum2 / n as f64 - mean * mean).sqrt() < 2.0
 }
 
 fn truncate_utf8(s: &str, max: usize) -> &str {
@@ -1082,6 +1173,9 @@ fn readme(b: &Value, shots: &[Value], (html_bytes, html_total): (usize, usize), 
             }
             if !src.is_empty() {
                 line.push_str(&format!(" — {}", shown_url(src)));
+            }
+            if e.get("rendered").and_then(Value::as_bool) == Some(false) {
+                line.push_str(" — didn't render in the screenshots (its area is one colour; it may need WebGL)");
             }
             md.push_str(&line);
             md.push('\n');
@@ -1423,6 +1517,41 @@ mod tests {
         assert!(md.contains("## Embedded views") && md.contains("iframe \"Sprunki\" (id game-iframe) — https://g.test/play"), "{md}");
         assert!(md.contains("- canvas\n"), "{md}");
         assert!(!readme(&json!({"url": "https://ex.com/"}), &[], (0, 0), true).contains("Embedded views"), "nothing embedded, no section");
+    }
+
+    /// R2.11: an embedded view that shows as one colour at every width it showed at didn't
+    /// render (a game may need WebGL), and the capture names it instead of passing its blank box
+    /// off as what the page shows. One width with something drawn means it did render.
+    #[test]
+    fn an_embedded_view_that_didnt_render_is_named() {
+        let d = tempfile::tempdir().unwrap();
+        // The screenshots are as wide as the CSS width their boxes were measured at, so the
+        // boxes map straight to pixels.
+        let blank = web_common::encode_png(&web_common::Image { width: 40, height: 30, rgba: vec![0; 40 * 30 * 4] }).unwrap();
+        let mut drawn = Vec::new();
+        for y in 0..20 {
+            for x in 0..30 {
+                drawn.extend_from_slice(&if (x / 5 + y / 5) % 2 == 0 { [200, 40, 40, 255] } else { [20, 20, 120, 255] });
+            }
+        }
+        let drawn = web_common::encode_png(&web_common::Image { width: 30, height: 20, rgba: drawn }).unwrap();
+        std::fs::write(d.path().join("screenshot-40.png"), &blank).unwrap();
+        std::fs::write(d.path().join("screenshot-30.png"), &drawn).unwrap();
+        let box_at = |width: u32| json!({"width": width, "x": 4, "y": 4, "w": 24, "h": 12});
+        let mut b = json!({
+            "webgl": false,
+            "embeds": [
+                {"tag": "iframe", "id": "game-iframe", "title": "Sprunki", "src": "https://g.test/play", "boxes": [box_at(40)]},
+                {"tag": "canvas", "boxes": [box_at(30)]},
+                {"tag": "canvas", "boxes": [box_at(40), box_at(30)]}
+            ]
+        });
+        let lines = unrendered_embeds(&mut b, d.path());
+        assert_eq!(lines, ["iframe \"Sprunki\""], "only the one blank at every width it showed at");
+        assert_eq!(b["embeds"][0]["rendered"], false);
+        assert!(b["embeds"][1].get("rendered").is_none() && b["embeds"][2].get("rendered").is_none(), "drawn at one width: rendered");
+        let md = readme(&b, &[], (0, 0), true);
+        assert!(md.contains("didn't render in the screenshots"), "{md}");
     }
 
     #[test]

@@ -104,6 +104,34 @@ fn profile_base(exe: &std::path::Path, home: Option<std::path::PathBuf>) -> std:
     }
 }
 
+/// The arguments that start a private Chromium for capture. Headless turns the GPU off, and a
+/// modern Chromium then refuses software WebGL (a game's "Could not get WebGL context") unless
+/// `--enable-unsafe-swiftshader` says the software renderer is fine (#R2.11): a capture must see
+/// what the page draws, so it is always allowed.
+fn chromium_args(profile: &std::path::Path, opts: &LaunchOptions) -> Vec<String> {
+    let mut args: Vec<String> = vec![
+        format!("--user-data-dir={}", profile.display()),
+        "--remote-debugging-port=0".into(),
+        "--remote-allow-origins=*".into(),
+        "--no-first-run".into(),
+        "--no-default-browser-check".into(),
+        "--disable-background-networking".into(),
+        "--disable-sync".into(),
+        "--disable-extensions".into(),
+        "--disable-features=Translate".into(),
+    ];
+    if opts.headless {
+        args.push("--headless=new".into());
+        args.push("--disable-gpu".into());
+        args.push("--enable-unsafe-swiftshader".into());
+    }
+    if opts.no_sandbox {
+        args.push("--no-sandbox".into());
+    }
+    args.push("about:blank".into());
+    args
+}
+
 impl Browser {
     /// A handle to a browser someone else owns (it is not killed when this drops).
     pub fn attached(endpoint: &Endpoint, product: &str, version: &str) -> Browser {
@@ -152,25 +180,7 @@ impl Browser {
         let exe = craft_anything_engines::locate("chromium", &ctx.session.settings.engines.tools, &ctx.session.settings.engine_store_dir())
             .ok_or_else(|| engine_missing("no Chromium-based browser was found"))?;
         let profile = BrowserProfile(super::artifact_tools::fresh_dir_in(&profile_base(&exe, dirs::home_dir()), "craft-browser")?);
-        let mut args: Vec<String> = vec![
-            format!("--user-data-dir={}", profile.0.display()),
-            "--remote-debugging-port=0".into(),
-            "--remote-allow-origins=*".into(),
-            "--no-first-run".into(),
-            "--no-default-browser-check".into(),
-            "--disable-background-networking".into(),
-            "--disable-sync".into(),
-            "--disable-extensions".into(),
-            "--disable-features=Translate".into(),
-        ];
-        if opts.headless {
-            args.push("--headless=new".into());
-            args.push("--disable-gpu".into());
-        }
-        if opts.no_sandbox {
-            args.push("--no-sandbox".into());
-        }
-        args.push("about:blank".into());
+        let args = chromium_args(&profile.0, opts);
         let cancel = ctx.cancel.clone();
         let tail = StderrTail::default();
         let sink = tail.clone();
@@ -1730,6 +1740,18 @@ mod tests {
         assert_eq!(px(0, 0), vec![0, 255, 0, 255], "left of the cut is page column 2");
         assert_eq!(px(3, 0), vec![0, 0, 255, 255], "right of the cut is page column 5");
         assert_eq!(px(0, 3), vec![255, 255, 255, 255], "rows past the image are white");
+    }
+
+    /// R2.11: a capture browser must be able to draw: headless Chromium turns the GPU off and a
+    /// modern Chromium then refuses software WebGL unless the flag allows it (a game's "Could not
+    /// get WebGL context"). A headed browser draws with the GPU and needs no flag.
+    #[test]
+    fn headless_chromium_allows_the_software_renderer() {
+        let headless = chromium_args(std::path::Path::new("/p"), &LaunchOptions::default());
+        assert!(headless.contains(&"--enable-unsafe-swiftshader".to_string()), "{headless:?}");
+        assert!(headless.contains(&"--disable-gpu".to_string()), "{headless:?}");
+        let headed = chromium_args(std::path::Path::new("/p"), &LaunchOptions { headless: false, ..LaunchOptions::default() });
+        assert!(!headed.contains(&"--enable-unsafe-swiftshader".to_string()), "{headed:?}");
     }
 
     /// A flow through the website tools on the Camoufox backend, with a stand-in helper (no
