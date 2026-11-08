@@ -456,6 +456,7 @@ pub const ENGINES: &[ExternalEngine] = &[
         path_setting: true,
         install: Install::Manual,
     },
+    manual(crate::camoufox::ID, "Camoufox", "Studying websites that block automated browsers", &["camoufox"], &["camoufox.exe", "camoufox.cmd"]),
     manual("frida", "Frida", "Tracing apps while they run", &["frida"], &["frida.exe"]),
     manual("gdb", "GDB", "Debugging native programs", &["gdb"], &["gdb.exe"]),
     manual("lldb", "LLDB", "Debugging Apple apps", &["lldb"], &["lldb.exe"]),

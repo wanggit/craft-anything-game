@@ -193,6 +193,8 @@ pub enum Requires {
     Ghidra,
     /// An external tool, by engine id (`adb`, `jadx`, `chromium`, `frida`, …).
     Engine(&'static str),
+    /// At least one of these external tools, by engine id (when either of two will do).
+    AnyEngine(&'static [&'static str]),
     /// One of these hosts, by `std::env::consts::OS` name (`macos`, `windows`, `linux`).
     Os(&'static [&'static str]),
 }

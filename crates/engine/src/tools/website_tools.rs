@@ -1,6 +1,8 @@
 //! Websites as targets: `web_site_open` starts a private browser owned by the session and loads a
 //! page; every other browser tool then looks at that page by default (see
-//! [`super::web_common::Browser::resolve`]). `web_site_capture` records what a rebuild needs —
+//! [`super::web_common::Browser::resolve`]). The browser is Camoufox (a fingerprint-resistant
+//! Firefox, through its Playwright helper) or a Chromium over CDP, chosen in settings
+//! ([`super::web_common::open_site_backend`]). `web_site_capture` records what a rebuild needs —
 //! full-page screenshots at several widths, the rendered HTML, design tokens, a layout outline,
 //! assets, links and form outlines — into a folder. `web_site_close` ends the browser.
 //!
@@ -8,11 +10,11 @@
 //! what any visitor sees on the page.
 
 use super::artifact_tools::{create_absent_dir, write_new_file};
-use super::browser_tools::{browser_env, cleanup, deadline};
+use super::browser_tools::deadline;
 use super::native_common::spec;
-use super::web_common::{self, Browser, LaunchOptions};
+use super::web_common::{self, Clip, LaunchOptions, PageConn, WebBackend};
 use crate::tool::{Caller, Ctx, Effects, Requires, ToolOutput, ToolSpec, Toolset, parse_params, schema_of};
-use craft_anything_engines::cdp::{self, CdpClient, CdpEvent, Deadline, Endpoint, PAGE_MAX_MESSAGE};
+use craft_anything_engines::cdp::{CdpEvent, Deadline};
 use craft_anything_evidence::{Authority, Confidence, Coverage, ErrorCode, EvidenceBuilder, Limitation, Location, Subject, ToolError, sha256_hex};
 use craft_anything_platform::sync::Mutex;
 use schemars::JsonSchema;
@@ -20,7 +22,6 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
 
 pub fn specs() -> Vec<ToolSpec> {
     vec![
@@ -31,7 +32,7 @@ pub fn specs() -> Vec<ToolSpec> {
             "Open a website in a private, hidden browser so it can be studied.",
             Toolset::Browser,
             Effects::EVIDENCE.union(Effects::EXECUTES_FOREIGN_CODE).union(Effects::ACCESSES_NETWORK).union(Effects::LAUNCHES_PROCESS),
-            Requires::Engine("chromium"),
+            Requires::AnyEngine(&["camoufox", "chromium"]),
             schema_of::<OpenParams>,
             web_site_open,
         ),
@@ -42,7 +43,7 @@ pub fn specs() -> Vec<ToolSpec> {
             "Save pictures and a blueprint of a web page so it can be rebuilt.",
             Toolset::Browser,
             Effects::EVIDENCE.union(Effects::WRITES_FILESYSTEM).union(Effects::ACCESSES_NETWORK),
-            Requires::Engine("chromium"),
+            Requires::AnyEngine(&["camoufox", "chromium"]),
             schema_of::<CaptureParams>,
             web_site_capture,
         ),
@@ -53,7 +54,7 @@ pub fn specs() -> Vec<ToolSpec> {
             "Open the site's menus, pop-ups and tabs and photograph each, so a rebuild can match them too.",
             Toolset::Browser,
             Effects::EVIDENCE.union(Effects::WRITES_FILESYSTEM).union(Effects::EXECUTES_FOREIGN_CODE).union(Effects::ACCESSES_NETWORK),
-            Requires::Engine("chromium"),
+            Requires::AnyEngine(&["camoufox", "chromium"]),
             schema_of::<StatesParams>,
             web_page_states_capture,
         ),
@@ -64,29 +65,26 @@ pub fn specs() -> Vec<ToolSpec> {
             "Close the hidden browser.",
             Toolset::Browser,
             Effects::MUTATES_SESSION.union(Effects::IDEMPOTENT),
-            Requires::Engine("chromium"),
+            Requires::AnyEngine(&["camoufox", "chromium"]),
             schema_of::<CloseParams>,
             web_site_close,
         ),
     ]
 }
 
-/// The session's website browser. The process lives as long as this slot (it is killed and its
-/// profile removed when the last handle drops).
+/// The session's website browser. The backend lives as long as this slot (its process is killed
+/// and its profile removed when the last handle drops).
 pub struct SiteBrowser {
-    pub endpoint: Endpoint,
-    pub product: String,
-    pub version: String,
+    pub backend: Arc<dyn WebBackend>,
     pub url: Mutex<String>,
     /// What went wrong while the last page opened ([`page_health`]); web_site_capture records it.
     pub health: Mutex<Value>,
-    _owner: Mutex<Browser>,
 }
 
 impl SiteBrowser {
-    /// A non-owning handle for the shared browser helpers.
-    fn handle(&self) -> Browser {
-        Browser::attached(&self.endpoint, &self.product, &self.version)
+    /// The evidence environment of this site's browser, in the run's mode.
+    fn env(&self, clean_room: bool) -> craft_anything_evidence::Environment {
+        web_common::backend_env(clean_room, self.backend.info())
     }
 }
 
@@ -157,23 +155,16 @@ fn web_site_open(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, ToolErr
         None => {
             ctx.report(None, "Starting a private browser…");
             let opts = LaunchOptions { allow_launch: true, headless: p.headless, no_sandbox: false, startup_secs: 30 };
-            let b = Browser::launch(ctx, &opts, &dl)?;
-            let site = Arc::new(SiteBrowser {
-                endpoint: b.endpoint.clone(),
-                product: b.product.clone(),
-                version: b.version.clone(),
-                url: Mutex::new(String::new()),
-                health: Mutex::new(Value::Null),
-                _owner: Mutex::new(b),
-            });
+            let backend = web_common::open_site_backend(ctx, &opts, p.width, p.height, &dl)?;
+            let site = Arc::new(SiteBrowser { backend, url: Mutex::new(String::new()), health: Mutex::new(Value::Null) });
             ctx.session.ext.insert(site.clone());
             site
         }
     };
     ctx.report(None, format!("Loading {url}…"));
-    let mut client = page_client(&site, &dl)?;
-    let r = navigate(&mut client, &url, p.width, p.height, p.settle_ms, &dl).and_then(|health| Ok((health, page_facts(&mut client, &dl)?)));
-    cleanup(&mut client, &dl);
+    let mut page = site.backend.page(&dl)?;
+    let r = page.navigate(&url, p.width, p.height, p.settle_ms, &dl).and_then(|health| Ok((health, page_facts(&mut *page, &dl)?)));
+    page.finish(&dl);
     let (health, facts) = r?;
     let final_url = facts.get("url").and_then(Value::as_str).unwrap_or(&url).to_string();
     if let Ok(mut u) = site.url.lock() {
@@ -200,28 +191,24 @@ fn web_site_open(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, ToolErr
         (0, 0) => opened,
         (e, f) => format!("{opened} While loading: {e} error(s), {f} failed request(s)."),
     };
-    let browser = site.handle();
-    let ev = EvidenceBuilder::new(
-        "web_site_open",
-        Subject { kind: "website".into(), sha256: None, name: Some(shown.clone()) },
-        browser_env(ctx.session.clean_room(), &browser),
-    )
-    .params(json!({"url": shown, "width": p.width, "height": p.height}))
-    .result(json!({"url": final_url, "title": title, "facts": facts, "health": health, "browser": site.product}))
-    .summary(summary)
-    .confidence(Confidence::Observed)
-    .authority(Authority::OurRun)
-    .limitation(Limitation::new("private_profile", "A fresh private browser: pages behind a login show their signed-out state."))
-    .coverage(Coverage::complete(1))
-    .location(Location::new("url", shown))
-    .build()?;
+    let ev =
+        EvidenceBuilder::new("web_site_open", Subject { kind: "website".into(), sha256: None, name: Some(shown.clone()) }, site.env(ctx.session.clean_room()))
+            .params(json!({"url": shown, "width": p.width, "height": p.height}))
+            .result(json!({"url": final_url, "title": title, "facts": facts, "health": health, "browser": site.backend.info().product}))
+            .summary(summary)
+            .confidence(Confidence::Observed)
+            .authority(Authority::OurRun)
+            .limitation(Limitation::new("private_profile", "A fresh private browser: pages behind a login show their signed-out state."))
+            .coverage(Coverage::complete(1))
+            .location(Location::new("url", shown))
+            .build()?;
     Ok(ToolOutput::evidence(ev))
 }
 
 /// The session's website browser when it is still answering; a dead one is dropped.
 fn live_site(ctx: &mut Ctx<'_>, dl: &Deadline) -> Option<Arc<SiteBrowser>> {
     let site = ctx.session.ext.get::<SiteBrowser>()?;
-    if cdp::json_version(&site.endpoint, dl).is_ok() {
+    if site.backend.alive(dl) {
         return Some(site);
     }
     ctx.session.ext.remove::<SiteBrowser>();
@@ -241,61 +228,6 @@ fn open_site(ctx: &mut Ctx<'_>, dl: &Deadline) -> Result<Arc<SiteBrowser>, ToolE
         ToolError::new(ErrorCode::NotFound, "no website is open").with_remediation(fix)
     })
 }
-
-fn page_client(site: &SiteBrowser, dl: &Deadline) -> Result<CdpClient, ToolError> {
-    let b = site.handle();
-    let targets = cdp::json_list(&site.endpoint, dl)?;
-    let target = web_common::pick_target(&targets, None, Some("page"))?;
-    web_common::connect_target(&b, target, PAGE_MAX_MESSAGE, dl)
-}
-
-/// Size the page and pin light mode, so captures don't depend on this computer's theme.
-fn set_viewport(client: &mut CdpClient, width: u32, height: u32, dl: &Deadline) -> Result<(), ToolError> {
-    client.call("Emulation.setDeviceMetricsOverride", json!({"width": width, "height": height, "deviceScaleFactor": 1, "mobile": width < 600}), None, dl)?;
-    let _ = client.call("Emulation.setEmulatedMedia", json!({"features": [{"name": "prefers-color-scheme", "value": "light"}]}), None, dl);
-    Ok(())
-}
-
-/// Open `url` and wait for it to settle; returns what went wrong while it loaded ([`page_health`]).
-fn navigate(client: &mut CdpClient, url: &str, width: u32, height: u32, settle_ms: u64, dl: &Deadline) -> Result<Value, ToolError> {
-    client.call("Page.enable", json!({}), None, dl)?;
-    // Errors and failed requests are read from the browser's own events; a browser that refuses
-    // one of these still loads the page.
-    for domain in ["Runtime.enable", "Log.enable", "Network.enable"] {
-        let _ = client.call(domain, json!({}), None, dl);
-    }
-    set_viewport(client, width, height, dl)?;
-    let r = client.call("Page.navigate", json!({"url": url}), None, dl)?;
-    if let Some(err) = r.get("errorText").and_then(Value::as_str).filter(|s| !s.is_empty()) {
-        return Err(ToolError::new(ErrorCode::ProgramFailed, format!("the page didn't load: {err}"))
-            .with_remediation("Check the address and your internet connection, then try again."));
-    }
-    // Wait for the load event (bounded by the overall deadline), then let late content settle.
-    let loaded = Deadline::new(Duration::from_secs(45), crate::tool::CancelToken::default());
-    let mut done = false;
-    let mut seen: Vec<CdpEvent> = Vec::new();
-    let mut keep = |events: Vec<CdpEvent>| {
-        let wanted = events.into_iter().filter(|e| e.method.starts_with("Runtime.") || e.method.starts_with("Log.") || e.method.starts_with("Network."));
-        seen.extend(wanted.take(MAX_HEALTH_EVENTS.saturating_sub(seen.len())));
-    };
-    while !done && !loaded.expired() && !dl.expired() {
-        let slice = Deadline::new(Duration::from_millis(250), crate::tool::CancelToken::default());
-        client.pump_until(&slice)?;
-        let events = client.take_events();
-        done = events.iter().any(|e| e.method == "Page.loadEventFired");
-        keep(events);
-    }
-    let settle = Deadline::new(Duration::from_millis(settle_ms.min(30_000)), crate::tool::CancelToken::default());
-    client.pump_until(&settle)?;
-    keep(client.take_events());
-    for domain in ["Network.disable", "Log.disable"] {
-        let _ = client.call(domain, json!({}), None, dl);
-    }
-    Ok(page_health(&seen))
-}
-
-/// Most browser events read for a page's health (a busy page sends thousands of network events).
-const MAX_HEALTH_EVENTS: usize = 20_000;
 
 /// What went wrong while a page loaded, from the browser's events: `errors` (uncaught script
 /// errors, console errors and error log entries, each text once) and `failed_requests` (answers
@@ -353,18 +285,13 @@ pub fn page_health(events: &[CdpEvent]) -> Value {
 }
 
 /// Evaluate one of our own read-only scripts in the page and return its JSON value.
-fn eval(client: &mut CdpClient, script: &str, dl: &Deadline) -> Result<Value, ToolError> {
-    let r = client.call("Runtime.evaluate", json!({"expression": script, "returnByValue": true, "awaitPromise": true}), None, dl)?;
-    if let Some(ex) = r.get("exceptionDetails") {
-        let m = ex.pointer("/exception/description").or_else(|| ex.get("text")).and_then(Value::as_str).unwrap_or("script error");
-        return Err(ToolError::new(ErrorCode::ProgramFailed, format!("reading the page failed: {}", m.lines().next().unwrap_or(m))));
-    }
-    Ok(r.pointer("/result/value").cloned().unwrap_or(Value::Null))
+fn eval(page: &mut dyn PageConn, script: &str, dl: &Deadline) -> Result<Value, ToolError> {
+    page.eval(script, dl)
 }
 
-fn page_facts(client: &mut CdpClient, dl: &Deadline) -> Result<Value, ToolError> {
+fn page_facts(page: &mut dyn PageConn, dl: &Deadline) -> Result<Value, ToolError> {
     eval(
-        client,
+        page,
         "({url: location.href, title: document.title, ready: document.readyState, lang: document.documentElement.lang || '', \
           width: document.documentElement.scrollWidth, height: document.documentElement.scrollHeight, \
           elements: document.getElementsByTagName('*').length, images: document.images.length, links: document.links.length, \
@@ -441,19 +368,6 @@ const REMEMBER_TAB_JS: &str = r#"(() => {
 
 const RESELECT_TAB_JS: &str = r#"(() => { const el = document.querySelector('[data-craft-tab-was="__I__"]'); if (!el) return false; el.removeAttribute('data-craft-tab-was'); el.click(); return true; })()"#;
 
-fn press_escape(client: &mut CdpClient, dl: &Deadline) {
-    for kind in ["keyDown", "keyUp"] {
-        let _ = client.call("Input.dispatchKeyEvent", json!({"type": kind, "key": "Escape", "code": "Escape", "windowsVirtualKeyCode": 27}), None, dl);
-    }
-}
-
-fn settle(client: &mut CdpClient, ms: u64) -> Result<(), ToolError> {
-    let d = Deadline::new(Duration::from_millis(ms), crate::tool::CancelToken::default());
-    client.pump_until(&d)?;
-    let _ = client.take_events();
-    Ok(())
-}
-
 /// What a click changed, in plain words, from the state before and after.
 fn state_change(before: &Value, after: &Value) -> Vec<&'static str> {
     let mut out = Vec::new();
@@ -486,13 +400,13 @@ fn web_page_states_capture(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutpu
     let dl = deadline(ctx, p.timeout_secs.max(30))?;
     let site = open_site(ctx, &dl)?;
     let out = create_absent_dir(&p.output_directory)?;
-    let mut client = page_client(&site, &dl)?;
+    let mut conn = site.backend.page(&dl)?;
+    let page = conn.as_mut();
     let r = (|| -> Result<(String, Vec<Value>, usize), ToolError> {
-        client.call("Page.enable", json!({}), None, &dl)?;
-        set_viewport(&mut client, p.width, 900, &dl)?;
-        settle(&mut client, 500)?;
-        let start = eval(&mut client, "location.href", &dl)?.as_str().unwrap_or_default().to_string();
-        let found = eval(&mut client, &FIND_STATES_JS.replace("__MAX__", &p.max_states.to_string()), &dl)?;
+        page.set_viewport(p.width, 900, &dl)?;
+        page.settle(500, &dl)?;
+        let start = eval(page, "location.href", &dl)?.as_str().unwrap_or_default().to_string();
+        let found = eval(page, &FIND_STATES_JS.replace("__MAX__", &p.max_states.to_string()), &dl)?;
         let found = found.as_array().cloned().unwrap_or_default();
         let mut states = Vec::new();
         for (n, c) in found.iter().enumerate() {
@@ -501,42 +415,39 @@ fn web_page_states_capture(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutpu
             }
             let i = c.get("index").and_then(Value::as_u64).unwrap_or(n as u64).to_string();
             ctx.report(Some(n as f32 / found.len().max(1) as f32), format!("Opening {}…", c.get("label").and_then(Value::as_str).unwrap_or("a control")));
-            let before = eval(&mut client, &STATE_JS.replace("__I__", &i), &dl)?;
-            let _ = eval(&mut client, &REMEMBER_TAB_JS.replace("__I__", &i), &dl);
-            if eval(&mut client, &CLICK_STATE_JS.replace("__I__", &i), &dl)? != true {
+            let before = eval(page, &STATE_JS.replace("__I__", &i), &dl)?;
+            let _ = eval(page, &REMEMBER_TAB_JS.replace("__I__", &i), &dl);
+            if eval(page, &CLICK_STATE_JS.replace("__I__", &i), &dl)? != true {
                 continue;
             }
-            settle(&mut client, 700)?;
-            let after = eval(&mut client, &STATE_JS.replace("__I__", &i), &dl).unwrap_or(Value::Null);
+            page.settle(700, &dl)?;
+            let after = eval(page, &STATE_JS.replace("__I__", &i), &dl).unwrap_or(Value::Null);
             let changed = state_change(&before, &after);
             let mut row = json!({"index": n, "kind": c.get("kind"), "label": c.get("label"), "changed": changed});
             if !changed.contains(&"address changed") {
-                let shot = client.call("Page.captureScreenshot", json!({"format": "png"}), None, &dl)?;
-                if let Some(data) = shot.get("data").and_then(Value::as_str) {
-                    let bytes = web_common::b64_decode(data)?;
-                    let name = format!("state-{}.png", n + 1);
-                    write_new_file(&out, std::slice::from_ref(&name), &bytes).map_err(ToolError::invalid)?;
-                    row["file"] = json!(name);
-                    row["sha256"] = json!(sha256_hex(&bytes));
-                }
+                let bytes = page.screenshot(None, &dl)?;
+                let name = format!("state-{}.png", n + 1);
+                write_new_file(&out, std::slice::from_ref(&name), &bytes).map_err(ToolError::invalid)?;
+                row["file"] = json!(name);
+                row["sha256"] = json!(sha256_hex(&bytes));
             }
             // Put the page back for the next one: close what opened, or go back to where it was.
-            press_escape(&mut client, &dl);
+            page.press_escape(&dl);
             if after["url"].as_str().is_some_and(|u| u != start) {
-                let _ = navigate(&mut client, &start, p.width, 900, 800, &dl)?;
+                let _ = page.navigate(&start, p.width, 900, 800, &dl)?;
                 // The page reloaded: its marks are gone, so mark the toggles again.
-                let _ = eval(&mut client, &FIND_STATES_JS.replace("__MAX__", &p.max_states.to_string()), &dl);
+                let _ = eval(page, &FIND_STATES_JS.replace("__MAX__", &p.max_states.to_string()), &dl);
             } else if after["expanded"] == "true" || after["open"] == true {
-                let _ = eval(&mut client, &CLICK_STATE_JS.replace("__I__", &i), &dl);
+                let _ = eval(page, &CLICK_STATE_JS.replace("__I__", &i), &dl);
             } else if changed.contains(&"tab selected") {
-                let _ = eval(&mut client, &RESELECT_TAB_JS.replace("__I__", &i), &dl);
+                let _ = eval(page, &RESELECT_TAB_JS.replace("__I__", &i), &dl);
             }
-            settle(&mut client, 300)?;
+            page.settle(300, &dl)?;
             states.push(row);
         }
         Ok((start, states, found.len()))
     })();
-    cleanup(&mut client, &dl);
+    page.finish(&dl);
     let (start, states, found) = r?;
     let json_bytes = serde_json::to_vec_pretty(&json!({"url": start, "width": p.width, "states": states})).map_err(|e| ToolError::internal(e.to_string()))?;
     write_new_file(&out, &["states.json".into()], &json_bytes).map_err(ToolError::invalid)?;
@@ -547,11 +458,10 @@ fn web_page_states_capture(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutpu
     } else {
         format!("Opened {} of {found} control(s) on {shown}; {pictured} pictured in {}.", states.len(), out.display())
     };
-    let browser = site.handle();
     let ev = EvidenceBuilder::new(
         "web_page_states_capture",
         Subject { kind: "website".into(), sha256: None, name: Some(shown.clone()) },
-        browser_env(ctx.session.clean_room(), &browser),
+        site.env(ctx.session.clean_room()),
     )
     .params(json!({"max_states": p.max_states, "width": p.width}))
     .result(json!({"url": start, "found": found, "states": states, "folder": out.display().to_string()}))
@@ -798,28 +708,29 @@ fn web_site_capture(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, Tool
     p.include_html &= !visitor;
     let dl = deadline(ctx, p.timeout_secs.max(30))?;
     let site = open_site(ctx, &dl)?;
-    let mut client = page_client(&site, &dl)?;
+    let mut conn = site.backend.page(&dl)?;
+    let page = conn.as_mut();
     // A site that didn't open leaves the browser on its own error page (or a blank one), which
     // would be captured as if it were the site (#158).
-    let here = eval(&mut client, "location.href", &dl).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
+    let here = eval(page, "location.href", &dl).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
     if here.is_empty() || here.starts_with("chrome-error:") || here == "about:blank" {
-        cleanup(&mut client, &dl);
+        page.finish(&dl);
         return Err(ToolError::new(ErrorCode::NotFound, "The website didn't open, so there's nothing to capture: the browser is showing its own error page.")
             .with_remediation("Open the site again with web_site_open and make sure it loads."));
     }
     let out = match create_absent_dir(&p.output_directory) {
         Ok(out) => out,
         Err(e) => {
-            cleanup(&mut client, &dl);
+            page.finish(&dl);
             return Err(e);
         }
     };
-    let r = capture_into(ctx, &mut client, &out, &p, &dl);
+    let r = capture_into(ctx, page, &out, &p, &dl);
     // Leave the page at the first (usually desktop) width for the tools that follow.
     if let Some(w) = p.widths.first() {
-        let _ = set_viewport(&mut client, *w, 900, &dl);
+        let _ = page.set_viewport(*w, 900, &dl);
     }
-    cleanup(&mut client, &dl);
+    page.finish(&dl);
     let (mut blueprint, shots, html) = r?;
     let html_bytes = html.0;
     if visitor {
@@ -846,8 +757,7 @@ fn web_site_capture(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, Tool
         n("forms"),
         out.display()
     );
-    let browser = site.handle();
-    let ev = EvidenceBuilder::new("web_site_capture", Subject { kind: "website".into(), sha256: None, name: Some(shown.clone()) }, browser_env(ctx.session.clean_room(), &browser))
+    let ev = EvidenceBuilder::new("web_site_capture", Subject { kind: "website".into(), sha256: None, name: Some(shown.clone()) }, site.env(ctx.session.clean_room()))
         .params(json!({"widths": p.widths, "max_height": p.max_height, "include_html": p.include_html, "noise_pass": p.noise_pass, "visitor_view": visitor}))
         .result(json!({
             "output_directory": out.display().to_string(),
@@ -889,38 +799,33 @@ fn html_cut((kept, total): (usize, usize)) -> Option<Limitation> {
     })
 }
 
-fn capture_into(ctx: &Ctx<'_>, client: &mut CdpClient, out: &Path, p: &CaptureParams, dl: &Deadline) -> Result<Captured, ToolError> {
-    client.call("Page.enable", json!({}), None, dl)?;
+fn capture_into(ctx: &Ctx<'_>, page: &mut dyn PageConn, out: &Path, p: &CaptureParams, dl: &Deadline) -> Result<Captured, ToolError> {
     let mut shots = Vec::new();
     let mut blueprint = Value::Null;
     let mut layouts = Vec::new();
     for (i, &w) in p.widths.iter().enumerate() {
         ctx.report(Some(i as f32 / p.widths.len() as f32), format!("Photographing the page at {w} px…"));
-        set_viewport(client, w, 900, dl)?;
-        settle(client, 900)?;
+        page.set_viewport(w, 900, dl)?;
+        page.settle(900, dl)?;
         // A page that can't be scrolled through is still photographed as it is.
-        let _ = eval(client, REVEAL_JS, dl);
+        let _ = page.eval(REVEAL_JS, dl);
         if i == 0 {
             // The blueprint is read at the first width, where the layout is the reference one.
-            blueprint = eval(client, BLUEPRINT_JS, dl)?;
+            blueprint = page.eval(BLUEPRINT_JS, dl)?;
         }
         // A page whose layout can't be read is still photographed.
-        if let Ok(Value::Object(mut layout)) = eval(client, LAYOUT_JS, dl) {
+        if let Ok(Value::Object(mut layout)) = page.eval(LAYOUT_JS, dl) {
             layout.insert("width".into(), json!(w));
             layouts.push(Value::Object(layout));
         }
-        let height = eval(client, "Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0)", dl)?
+        let height = page
+            .eval("Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0)", dl)?
             .as_u64()
             .unwrap_or(900)
             .clamp(320, u64::from(p.max_height));
-        let clip = json!({"format": "png", "captureBeyondViewport": true, "clip": {"x": 0, "y": 0, "width": w, "height": height, "scale": 1}});
-        let photograph = |client: &mut CdpClient| -> Result<Vec<u8>, ToolError> {
-            let shot = client.call("Page.captureScreenshot", clip.clone(), None, dl)?;
-            let data =
-                shot.get("data").and_then(Value::as_str).ok_or_else(|| ToolError::new(ErrorCode::GarbledOutput, "the browser returned no screenshot"))?;
-            web_common::b64_decode(data)
-        };
-        let bytes = photograph(client)?;
+        let clip = Clip { x: 0.0, y: 0.0, width: f64::from(w), height: height as f64 };
+        let photograph = |page: &mut dyn PageConn| -> Result<Vec<u8>, ToolError> { page.screenshot(Some(clip), dl) };
+        let bytes = photograph(page)?;
         let (pw, ph) = web_common::png_dimensions(&bytes)?;
         let name = format!("screenshot-{w}.png");
         write_new_file(out, std::slice::from_ref(&name), &bytes).map_err(ToolError::invalid)?;
@@ -928,10 +833,10 @@ fn capture_into(ctx: &Ctx<'_>, client: &mut CdpClient, out: &Path, p: &CapturePa
         if p.noise_pass {
             // The same page twice more, at uneven gaps so something repeating every so often
             // can't look still in both: what changed by itself moves, not the build's fault.
-            settle(client, 900)?;
-            let second = photograph(client)?;
-            settle(client, 1300)?;
-            let third = photograph(client)?;
+            page.settle(900, dl)?;
+            let second = photograph(page)?;
+            page.settle(1300, dl)?;
+            let third = photograph(page)?;
             if let (Ok(a), Ok(b), Ok(c)) = (web_common::decode_png(&bytes), web_common::decode_png(&second), web_common::decode_png(&third)) {
                 let mask = web_common::NoiseMask::between(&a, &b, 24).union(&web_common::NoiseMask::between(&a, &c, 24));
                 row["noise_tiles"] = json!(mask.count());
@@ -949,7 +854,7 @@ fn capture_into(ctx: &Ctx<'_>, client: &mut CdpClient, out: &Path, p: &CapturePa
     }
     let mut html_bytes = (0, 0);
     if p.include_html {
-        let html = eval(client, "document.documentElement.outerHTML", dl)?;
+        let html = page.eval("document.documentElement.outerHTML", dl)?;
         let html = html.as_str().unwrap_or_default();
         let kept = truncate_utf8(html, MAX_HTML_BYTES);
         html_bytes = (kept.len(), html.len());

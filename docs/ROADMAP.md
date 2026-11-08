@@ -85,7 +85,7 @@ Issues are ranked by people affected and how badly, after leaving out what's alr
 | 3 | R2.7, R2.8 | — | Small gaps left in finished work |
 | 3 | R2.9 Everyday use, R2.10 Pinned builds | — | Open to anyone at any time; most lines stand alone |
 | 3 | R1.5 | — | Small leftovers |
-| Any | M3: R3.3, R3.9, R3.11 | — | Open lane |
+| Any | M3: R3.3, R3.9, R3.11, R3.14 | — | Open lane |
 | Later | R4.1 macOS CLI, R4.2 Managed tier | **decision** | Not before M5 |
 
 ---
@@ -176,7 +176,9 @@ only when it's green and a maintainer has fully reviewed it, code as well as wor
       busy machine can refuse while another test's child still holds the file open
 - [ ] `a_remote_query_expands_only_the_remote_working_directory` (ai crate) fails on a Mac: the
       temp folder is `/var/…`, a link to `/private/var/…`, and the shell's `$PWD` gives the second.
-      Compare with the folder's canonical path
+      Compare with the folder's canonical path. `remote_discovery_uses_the_remote_program_and_connection_context`
+      fails there too (the remote program's configured path comes back as its bare name): check
+      both together on a Mac
 - [ ] Revisit the two advisory exceptions in `deny.toml`: `rsa` (no fix; we only verify with public
       keys) when rsa 0.10 lands, and unmaintained `zbus_names`/`zvariant` (Linux-only via keyring
       and accesskit) when those move on. `deny.toml`'s comments say this is tracked in R0.3: point
@@ -864,6 +866,28 @@ Owner: open · Status: in progress
       template only real calendar dates in API paths (#602–#605, by Afloat16)
 - [x] Preserve empty query pairs when matching older stand-in recordings, without treating raw
       query separators as pairs — claimed: Afloat16, branch `bugfix/r3.13-preserve-empty-query-pairs-20261103`
+
+### R3.14 A stealth-resistant browser (Camoufox via Playwright)
+Owner: open · Status: in progress
+A site's anti-bot wall can flag the browser we launch as automation and lose a whole capture;
+Camoufox (a Firefox build made to look like a person's browser) passes those walls more often.
+It speaks Playwright, not CDP, so it needs its own engine and the browser seam the web tools share.
+- [x] `camoufox` as an external engine (`crates/engines/src/table.rs`, a `tool_paths!` setting in
+      `settings.rs`) with a helper that drives Camoufox through its Playwright integration,
+      requests as JSON lines on stdio via `platform::process` (deadlines, capped output, payloads
+      that can grow as files in a work folder), and unit tests with a stand-in helper
+      — claimed: claude, branch `feature/r3.14-camoufox-backend`
+- [x] The website tools' page reads (navigate, evaluate, screenshot, network and console capture)
+      behind one browser seam (`PageConn`/`WebBackend` in `web_common.rs`), so `web_site_open`,
+      `web_site_capture` and `web_page_states_capture` run on Camoufox when it is installed
+      (`auto`, the default) or set in config.toml (`engines.web_browser`); live open → capture →
+      close on a local page with Camoufox 156.0.1, evidence naming the camoufox engine and a
+      clean teardown — claimed: claude, branch `feature/r3.14-camoufox-backend`
+- [ ] The generic browser tools (`web_page_*` in browser_tools.rs) on the same seam, so they can
+      inspect a Camoufox site too
+- [ ] Settings UI for `engines.web_browser` (config.toml only so far)
+- [ ] Live runs against real sites behind anti-bot walls with Camoufox, and the success
+      comparison against the Chromium path; record results in tool-status.md
 
 ---
 

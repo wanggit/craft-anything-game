@@ -13,6 +13,18 @@ pub enum Mode {
     Experienced,
 }
 
+/// Which browser the website tools use. Camoufox (a fingerprint-resistant Firefox build) passes
+/// anti-bot walls more often than an ordinary automated Chromium (R3.14).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WebBrowser {
+    /// Camoufox when it is installed, else a Chromium-based browser.
+    #[default]
+    Auto,
+    Chromium,
+    Camoufox,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GhidraSettings {
@@ -65,13 +77,15 @@ macro_rules! tool_paths {
 }
 
 // Ghidra is not here: its folder is `GhidraSettings::install_dir`.
-tool_paths!(adb, jadx, apktool, chromium, frida, gdb, lldb, mitmdump, binwalk, unblob, ilspy, java, tshark, objdump, rizin, rtl433, vineflower);
+tool_paths!(adb, jadx, apktool, chromium, camoufox, frida, gdb, lldb, mitmdump, binwalk, unblob, ilspy, java, tshark, objdump, rizin, rtl433, vineflower);
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct EngineSettings {
     pub ghidra: GhidraSettings,
     pub tools: ToolPaths,
+    /// Which browser `web_site_*` uses ([`WebBrowser`]); `auto` prefers Camoufox when installed.
+    pub web_browser: WebBrowser,
     /// Folder for managed engine installs; defaults to `<data dir>/engines`.
     pub store_dir: Option<PathBuf>,
     /// URL of a user-run JEB MCP server, e.g. `http://127.0.0.1:8425/mcp` (loopback, plain HTTP only).

@@ -8,6 +8,7 @@ use craft_anything_engines::cdp::{self, CdpClient, Deadline, Endpoint, WsConn};
 use craft_anything_evidence::{Environment, ErrorCode, ToolError, host_triple, sha256_hex};
 use craft_anything_platform::process::{Process, RunningProcess, StdinMode};
 use serde_json::{Value, json};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Biggest screenshot we will decode or return inline.
@@ -132,11 +133,14 @@ impl Browser {
                 _profile: None,
             });
         }
-        // A website opened with web_site_open is the page every browser tool looks at by default.
+        // A website opened with web_site_open is the page every browser tool looks at by default
+        // (only when it is a CDP page; a Camoufox site is the website tools' own).
         if let Some(site) = ctx.session.ext.get::<super::website_tools::SiteBrowser>()
-            && cdp::json_version(&site.endpoint, dl).is_ok()
+            && let Some(ep) = site.backend.cdp_endpoint()
+            && site.backend.alive(dl)
         {
-            return Ok(Browser::attached(&site.endpoint, &site.product, &site.version));
+            let info = site.backend.info();
+            return Ok(Browser::attached(&ep, &info.product, &info.version));
         }
         if !opts.allow_launch {
             return Err(engine_missing("no endpoint was given"));
@@ -293,13 +297,360 @@ pub fn pick_target<'a>(targets: &'a [Value], target_id: Option<&str>, want_kind:
 
 /// Connect a page/renderer target's WebSocket and build a JSON-RPC client.
 pub fn connect_target(browser: &Browser, target: &Value, max_message: usize, dl: &Deadline) -> Result<CdpClient, ToolError> {
+    connect_endpoint(&browser.endpoint, target, max_message, dl)
+}
+
+/// [`connect_target`] for an endpoint a backend holds.
+pub fn connect_endpoint(endpoint: &Endpoint, target: &Value, max_message: usize, dl: &Deadline) -> Result<CdpClient, ToolError> {
     let ws_url = target.get("webSocketDebuggerUrl").and_then(Value::as_str).ok_or_else(|| {
         ToolError::new(ErrorCode::EngineMissing, "the target has no webSocketDebuggerUrl (another client may be attached)")
             .with_remediation("Close other DevTools clients, or pick a different target.")
     })?;
-    let wt = cdp::ws_target(ws_url, &browser.endpoint)?;
+    let wt = cdp::ws_target(ws_url, endpoint)?;
     let conn = WsConn::connect(&wt, max_message, dl)?;
     Ok(CdpClient::new(conn))
+}
+
+// ---------------------------------------------------------------------------------------------
+// Browser backends: one page interface for CDP and for Camoufox (R3.14)
+
+/// A region of the page in CSS pixels, in page coordinates (from the page's top left).
+#[derive(Debug, Clone, Copy)]
+pub struct Clip {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+/// One page in a running browser — everything the website tools do to it. A CDP page is a
+/// Chromium's; a Camoufox page answers the same moves through its Playwright helper.
+pub trait PageConn {
+    /// Open `url` and wait for it to settle; returns what went wrong while it loaded
+    /// ([`super::website_tools::page_health`]).
+    fn navigate(&mut self, url: &str, width: u32, height: u32, settle_ms: u64, dl: &Deadline) -> Result<Value, ToolError>;
+    /// Evaluate one of our own read-only scripts in the page and return its JSON value.
+    fn eval(&mut self, script: &str, dl: &Deadline) -> Result<Value, ToolError>;
+    /// A PNG of the page: the whole page cut to `clip` (page coordinates), or of the current
+    /// viewport when `clip` is None.
+    fn screenshot(&mut self, clip: Option<Clip>, dl: &Deadline) -> Result<Vec<u8>, ToolError>;
+    /// Size the page and pin light mode, so captures don't depend on this computer's theme.
+    fn set_viewport(&mut self, width: u32, height: u32, dl: &Deadline) -> Result<(), ToolError>;
+    fn press_escape(&mut self, dl: &Deadline);
+    /// Let late content settle.
+    fn settle(&mut self, ms: u64, dl: &Deadline) -> Result<(), ToolError>;
+    /// Leave the page tidy (disable what we enabled); bounded even past the deadline.
+    fn finish(&mut self, dl: &Deadline);
+}
+
+/// What a browser backend is: its identity (for evidence) and a way to reach its page.
+pub trait WebBackend: Send + Sync {
+    fn info(&self) -> &BackendInfo;
+    /// Is the browser still answering?
+    fn alive(&self, dl: &Deadline) -> bool;
+    /// Connect to the page this backend drives.
+    fn page(&self, dl: &Deadline) -> Result<Box<dyn PageConn + '_>, ToolError>;
+    /// The loopback CDP endpoint, when this backend speaks CDP (the other browser tools attach
+    /// to the session's site through it).
+    fn cdp_endpoint(&self) -> Option<Endpoint> {
+        None
+    }
+}
+
+/// The browser's identity, for evidence: the engine that drove it (`cdp` or `camoufox`) and
+/// what the browser says it is.
+pub struct BackendInfo {
+    pub engine: &'static str,
+    pub product: String,
+    pub version: String,
+    pub user_agent: String,
+}
+
+/// The evidence environment for a website observation through `info`'s backend.
+pub fn backend_env(clean_room: bool, info: &BackendInfo) -> Environment {
+    Environment { clean_room, engine: info.engine.into(), engine_version: Some(info.version.clone()), host: host_triple(), language_id: None }
+}
+
+/// A page over CDP, in a Chromium.
+struct CdpConn(CdpClient);
+
+impl PageConn for CdpConn {
+    fn navigate(&mut self, url: &str, width: u32, height: u32, settle_ms: u64, dl: &Deadline) -> Result<Value, ToolError> {
+        self.0.call("Page.enable", json!({}), None, dl)?;
+        // Errors and failed requests are read from the browser's own events; a browser that
+        // refuses one of these still loads the page.
+        for domain in ["Runtime.enable", "Log.enable", "Network.enable"] {
+            let _ = self.0.call(domain, json!({}), None, dl);
+        }
+        self.set_viewport(width, height, dl)?;
+        let r = self.0.call("Page.navigate", json!({"url": url}), None, dl)?;
+        if let Some(err) = r.get("errorText").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+            return Err(ToolError::new(ErrorCode::ProgramFailed, format!("the page didn't load: {err}"))
+                .with_remediation("Check the address and your internet connection, then try again."));
+        }
+        // Wait for the load event (bounded by the overall deadline), then let late content settle.
+        let loaded = Deadline::new(Duration::from_secs(45), crate::tool::CancelToken::default());
+        let mut done = false;
+        let mut seen: Vec<craft_anything_engines::cdp::CdpEvent> = Vec::new();
+        let mut keep = |events: Vec<craft_anything_engines::cdp::CdpEvent>| {
+            let wanted = events.into_iter().filter(|e| e.method.starts_with("Runtime.") || e.method.starts_with("Log.") || e.method.starts_with("Network."));
+            seen.extend(wanted.take(MAX_HEALTH_EVENTS.saturating_sub(seen.len())));
+        };
+        while !done && !loaded.expired() && !dl.expired() {
+            let slice = Deadline::new(Duration::from_millis(250), crate::tool::CancelToken::default());
+            self.0.pump_until(&slice)?;
+            let events = self.0.take_events();
+            done = events.iter().any(|e| e.method == "Page.loadEventFired");
+            keep(events);
+        }
+        let settle = Deadline::new(Duration::from_millis(settle_ms.min(30_000)), crate::tool::CancelToken::default());
+        self.0.pump_until(&settle)?;
+        keep(self.0.take_events());
+        for domain in ["Network.disable", "Log.disable"] {
+            let _ = self.0.call(domain, json!({}), None, dl);
+        }
+        Ok(super::website_tools::page_health(&seen))
+    }
+
+    fn eval(&mut self, script: &str, dl: &Deadline) -> Result<Value, ToolError> {
+        let r = self.0.call("Runtime.evaluate", json!({"expression": script, "returnByValue": true, "awaitPromise": true}), None, dl)?;
+        if let Some(ex) = r.get("exceptionDetails") {
+            let m = ex.pointer("/exception/description").or_else(|| ex.get("text")).and_then(Value::as_str).unwrap_or("script error");
+            return Err(ToolError::new(ErrorCode::ProgramFailed, format!("reading the page failed: {}", m.lines().next().unwrap_or(m))));
+        }
+        Ok(r.pointer("/result/value").cloned().unwrap_or(Value::Null))
+    }
+
+    fn screenshot(&mut self, clip: Option<Clip>, dl: &Deadline) -> Result<Vec<u8>, ToolError> {
+        let params = match clip {
+            None => json!({"format": "png"}),
+            Some(c) => json!({"format": "png", "captureBeyondViewport": true, "clip": {"x": c.x, "y": c.y, "width": c.width, "height": c.height, "scale": 1}}),
+        };
+        let shot = self.0.call("Page.captureScreenshot", params, None, dl)?;
+        let data = shot.get("data").and_then(Value::as_str).ok_or_else(|| ToolError::new(ErrorCode::GarbledOutput, "the browser returned no screenshot"))?;
+        b64_decode(data)
+    }
+
+    fn set_viewport(&mut self, width: u32, height: u32, dl: &Deadline) -> Result<(), ToolError> {
+        self.0.call(
+            "Emulation.setDeviceMetricsOverride",
+            json!({"width": width, "height": height, "deviceScaleFactor": 1, "mobile": width < 600}),
+            None,
+            dl,
+        )?;
+        let _ = self.0.call("Emulation.setEmulatedMedia", json!({"features": [{"name": "prefers-color-scheme", "value": "light"}]}), None, dl);
+        Ok(())
+    }
+
+    fn press_escape(&mut self, dl: &Deadline) {
+        for kind in ["keyDown", "keyUp"] {
+            let _ = self.0.call("Input.dispatchKeyEvent", json!({"type": kind, "key": "Escape", "code": "Escape", "windowsVirtualKeyCode": 27}), None, dl);
+        }
+    }
+
+    fn settle(&mut self, ms: u64, _dl: &Deadline) -> Result<(), ToolError> {
+        let d = Deadline::new(Duration::from_millis(ms), crate::tool::CancelToken::default());
+        self.0.pump_until(&d)?;
+        let _ = self.0.take_events();
+        Ok(())
+    }
+
+    fn finish(&mut self, dl: &Deadline) {
+        super::browser_tools::cleanup(&mut self.0, dl);
+    }
+}
+
+/// A Chromium over CDP (launched by us or attached).
+pub struct CdpBackend {
+    info: BackendInfo,
+    endpoint: Endpoint,
+    // Owned for its lifetime: dropped (killed, profile removed) when the last Arc goes.
+    #[allow(dead_code)]
+    browser: craft_anything_platform::sync::Mutex<Browser>,
+}
+
+impl WebBackend for CdpBackend {
+    fn info(&self) -> &BackendInfo {
+        &self.info
+    }
+
+    fn alive(&self, dl: &Deadline) -> bool {
+        cdp::json_version(&self.endpoint, dl).is_ok()
+    }
+
+    fn page(&self, dl: &Deadline) -> Result<Box<dyn PageConn + '_>, ToolError> {
+        let targets = cdp::json_list(&self.endpoint, dl)?;
+        let target = pick_target(&targets, None, Some("page"))?;
+        Ok(Box::new(CdpConn(connect_endpoint(&self.endpoint, target, cdp::PAGE_MAX_MESSAGE, dl)?)))
+    }
+
+    fn cdp_endpoint(&self) -> Option<Endpoint> {
+        Some(self.endpoint.clone())
+    }
+}
+
+/// Most browser events read for a page's health (a busy page sends thousands of network events).
+const MAX_HEALTH_EVENTS: usize = 20_000;
+
+/// Camoufox through its Playwright helper (R3.14): one helper process, one page.
+pub struct CamoufoxBackend {
+    info: BackendInfo,
+    helper: Arc<craft_anything_platform::sync::Mutex<craft_anything_engines::camoufox::Helper>>,
+}
+
+impl Drop for CamoufoxBackend {
+    fn drop(&mut self) {
+        // Close the browser through its own API first: killing the helper alone leaves the
+        // browser dying slowly on its own (seen in a live run). A call still in flight keeps
+        // the guard; the helper's own drop kills everything as the backstop.
+        if let Ok(mut h) = self.helper.try_lock() {
+            h.close();
+        }
+    }
+}
+
+/// A page in Camoufox. Every move is one helper request; each lock is labelled and short-lived.
+struct CamoufoxConn(Arc<craft_anything_platform::sync::Mutex<craft_anything_engines::camoufox::Helper>>);
+
+impl CamoufoxConn {
+    /// Run one helper request with the guard labelled, so a long page load is waited for, not
+    /// treated as a stuck lock.
+    fn with_helper<T>(&self, job: &'static str, f: impl FnOnce(&mut craft_anything_engines::camoufox::Helper) -> Result<T, ToolError>) -> Result<T, ToolError> {
+        let mut guard = self.0.lock().map_err(|_| ToolError::internal("the Camoufox helper lock is poisoned"))?;
+        guard.label(job);
+        f(&mut guard)
+    }
+}
+
+impl PageConn for CamoufoxConn {
+    fn navigate(&mut self, url: &str, width: u32, height: u32, settle_ms: u64, dl: &Deadline) -> Result<Value, ToolError> {
+        self.with_helper("camoufox-navigate", |h| {
+            h.viewport(width, height, dl)?;
+            let (_loaded, events) = h.goto(url, settle_ms, dl)?;
+            Ok(super::website_tools::page_health(&events))
+        })
+    }
+
+    fn eval(&mut self, script: &str, dl: &Deadline) -> Result<Value, ToolError> {
+        self.with_helper("camoufox-eval", |h| {
+            h.eval(script, dl).map_err(|e| {
+                if e.code == ErrorCode::ProgramFailed { ToolError::new(ErrorCode::ProgramFailed, format!("reading the page failed: {}", e.message)) } else { e }
+            })
+        })
+    }
+
+    fn screenshot(&mut self, clip: Option<Clip>, dl: &Deadline) -> Result<Vec<u8>, ToolError> {
+        self.with_helper("camoufox-screenshot", |h| {
+            let shot = h.screenshot(clip.is_some(), dl)?;
+            let Some(c) = clip else { return Ok(shot) };
+            crop_png(&shot, c)
+        })
+    }
+
+    fn set_viewport(&mut self, width: u32, height: u32, dl: &Deadline) -> Result<(), ToolError> {
+        self.with_helper("camoufox-viewport", |h| h.viewport(width, height, dl))
+    }
+
+    fn press_escape(&mut self, dl: &Deadline) {
+        let _ = self.with_helper("camoufox-key", |h| h.key("Escape", dl));
+    }
+
+    fn settle(&mut self, ms: u64, dl: &Deadline) -> Result<(), ToolError> {
+        self.with_helper("camoufox-settle", |h| h.sleep(ms, dl))
+    }
+
+    fn finish(&mut self, _dl: &Deadline) {
+        // Nothing is left enabled between calls: the helper keeps its own page tidy.
+    }
+}
+
+impl WebBackend for CamoufoxBackend {
+    fn info(&self) -> &BackendInfo {
+        &self.info
+    }
+
+    fn alive(&self, _dl: &Deadline) -> bool {
+        self.helper.lock().map(|mut h| h.alive()).unwrap_or(false)
+    }
+
+    fn page(&self, _dl: &Deadline) -> Result<Box<dyn PageConn + '_>, ToolError> {
+        Ok(Box::new(CamoufoxConn(self.helper.clone())))
+    }
+}
+
+/// Cut a full-page PNG to `clip` (page coordinates); rows past the image are white, so a page
+/// shorter than the clip still gives the requested size.
+pub fn crop_png(bytes: &[u8], clip: Clip) -> Result<Vec<u8>, ToolError> {
+    let img = decode_png(bytes)?;
+    let (x, y) = ((clip.x.max(0.0)) as u32, (clip.y.max(0.0)) as u32);
+    let (w, h) = ((clip.width.max(1.0)) as u32, (clip.height.max(1.0)) as u32);
+    let mut rgba = vec![255u8; (w as usize).saturating_mul(h as usize).saturating_mul(4)];
+    for row in 0..h {
+        let src_y = y.saturating_add(row);
+        if src_y >= img.height {
+            break;
+        }
+        for col in 0..w {
+            let src_x = x.saturating_add(col);
+            if src_x >= img.width {
+                break;
+            }
+            let src = ((src_y as usize).saturating_mul(img.width as usize).saturating_add(src_x as usize)).saturating_mul(4);
+            let dst = ((row as usize).saturating_mul(w as usize).saturating_add(col as usize)).saturating_mul(4);
+            if let (Some(s), Some(d)) = (img.rgba.get(src..src + 4), rgba.get_mut(dst..dst + 4)) {
+                d.copy_from_slice(s);
+            }
+        }
+    }
+    encode_png(&Image { width: w, height: h, rgba })
+}
+
+/// Start the website tools' browser: Camoufox when the settings ask for it (or say `auto` and
+/// it is installed), else a private Chromium. `width`/`height` size the first page.
+pub fn open_site_backend(ctx: &Ctx<'_>, opts: &LaunchOptions, width: u32, height: u32, dl: &Deadline) -> Result<Arc<dyn WebBackend>, ToolError> {
+    let camoufox = ctx.session.settings.engine_path(craft_anything_engines::camoufox::ID);
+    match (ctx.session.settings.engines.web_browser, camoufox) {
+        (crate::settings::WebBrowser::Chromium, _) => launch_cdp_backend(ctx, opts, dl),
+        (crate::settings::WebBrowser::Auto, None) => launch_cdp_backend(ctx, opts, dl),
+        (_, Some(exe)) => launch_camoufox_backend(ctx, &exe, opts.headless, width, height, dl),
+        (crate::settings::WebBrowser::Camoufox, None) => Err(ToolError::new(
+            ErrorCode::EngineMissing,
+            "Camoufox is set as the website browser, but it isn't installed.",
+        )
+        .with_remediation("Install it (`pip install camoufox`, then `camoufox fetch`) and set its path in Settings → Engines, or set engines.web_browser = \"chromium\" in config.toml.")),
+    }
+}
+
+fn launch_cdp_backend(ctx: &Ctx<'_>, opts: &LaunchOptions, dl: &Deadline) -> Result<Arc<dyn WebBackend>, ToolError> {
+    let b = Browser::launch(ctx, opts, dl)?;
+    let info = BackendInfo { engine: "cdp", product: b.product.clone(), version: b.version.clone(), user_agent: b.user_agent.clone() };
+    Ok(Arc::new(CdpBackend { info, endpoint: b.endpoint.clone(), browser: craft_anything_platform::sync::Mutex::new(b) }))
+}
+
+fn launch_camoufox_backend(
+    _ctx: &Ctx<'_>,
+    exe: &std::path::Path,
+    headless: bool,
+    width: u32,
+    height: u32,
+    dl: &Deadline,
+) -> Result<Arc<dyn WebBackend>, ToolError> {
+    let work = super::artifact_tools::fresh_dir_in(&profile_base(exe, dirs::home_dir()), "craft-camoufox")?;
+    let cmd = craft_anything_engines::camoufox::helper_command(exe, &work)?;
+    let mut helper = craft_anything_engines::camoufox::Helper::start(&cmd, &work, dl)?;
+    let os = match std::env::consts::OS {
+        "macos" => "macos",
+        "windows" => "windows",
+        _ => "linux",
+    };
+    let opened = helper.open(headless, width, height, os, dl)?;
+    let info = BackendInfo {
+        engine: "camoufox",
+        product: opened.get("product").and_then(Value::as_str).unwrap_or("Camoufox").to_string(),
+        version: opened.get("version").and_then(Value::as_str).unwrap_or_default().to_string(),
+        user_agent: opened.get("user_agent").and_then(Value::as_str).unwrap_or_default().to_string(),
+    };
+    Ok(Arc::new(CamoufoxBackend { info, helper: Arc::new(craft_anything_platform::sync::Mutex::new(helper)) }))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1354,6 +1705,178 @@ mod tests {
         assert_eq!(perceptual_similarity(&stripes, &img(100, 120, &|_, _| 0)), 0.0, "different sizes");
         let big = img(2000, 40, &|x, _| (x % 256) as u8);
         assert!(perceptual_similarity(&big, &big) > 0.999, "shrunk before comparing");
+    }
+
+    #[test]
+    fn crop_png_cuts_the_page_and_pads_white() {
+        // A 6×4 image: red column 0..2, green 2..4, blue 4..6.
+        let mut rgba = Vec::new();
+        for _y in 0..4 {
+            for x in 0..6 {
+                let c = match x {
+                    0..=1 => [255, 0, 0, 255],
+                    2..=3 => [0, 255, 0, 255],
+                    _ => [0, 0, 255, 255],
+                };
+                rgba.extend_from_slice(&c);
+            }
+        }
+        let png = encode_png(&Image { width: 6, height: 4, rgba }).unwrap();
+        // Cut to (2, 1, 4×4): two green, two blue columns, then two white rows (past the image).
+        let cut = crop_png(&png, Clip { x: 2.0, y: 1.0, width: 4.0, height: 4.0 }).unwrap();
+        let img = decode_png(&cut).unwrap();
+        assert_eq!((img.width, img.height), (4, 4));
+        let px = |x: usize, y: usize| img.rgba[(y * 4 + x) * 4..(y * 4 + x) * 4 + 4].to_vec();
+        assert_eq!(px(0, 0), vec![0, 255, 0, 255], "left of the cut is page column 2");
+        assert_eq!(px(3, 0), vec![0, 0, 255, 255], "right of the cut is page column 5");
+        assert_eq!(px(0, 3), vec![255, 255, 255, 255], "rows past the image are white");
+    }
+
+    /// A flow through the website tools on the Camoufox backend, with a stand-in helper (no
+    /// browser, no network): open → capture → close, and the two honest refusals. The fake
+    /// install is a `camoufox` marker beside a `python3` wrapper that runs this test binary as
+    /// the helper (the work folder travels in the wrapper's environment).
+    #[cfg(unix)]
+    #[test]
+    fn the_site_tools_run_on_the_camoufox_backend() {
+        use crate::tool::{Caller, ToolOutput};
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let exe = std::env::current_exe().unwrap();
+        std::fs::write(bin.join("camoufox"), b"never run").unwrap();
+        let wrapper = bin.join("python3");
+        std::fs::write(
+            &wrapper,
+            format!(
+                "#!/bin/sh\nCRAFT_STANDIN_WORK=\"$3\" exec \"{}\" --ignored --exact tools::web_common::tests::camoufox_standin --nocapture\n",
+                exe.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mut s = crate::testing::session();
+        s.settings.engines.tools.camoufox = Some(bin.join("camoufox"));
+        s.settings.engines.web_browser = crate::settings::WebBrowser::Camoufox;
+        s.settings.deep_mode = true; // so the page's health is reported
+        let e = crate::Engine::new(s);
+        let cli = || crate::CallOptions::new(Caller::Cli).with_consent(crate::Consent::Granted);
+
+        let opened = e.call("web_site_open", json!({"url": "http://127.0.0.1:1/", "timeout_secs": 30}), cli()).unwrap();
+        let ToolOutput::Evidence(opened) = opened else { panic!("web_site_open returns evidence") };
+        assert_eq!(opened.environment.engine, "camoufox");
+        assert_eq!(opened.environment.engine_version.as_deref(), Some("156.0.1"));
+        assert_eq!(opened.result["browser"], "Camoufox");
+        assert_eq!(opened.result["title"], "Stand-in");
+        let failed = opened.result["health"]["failed_requests"].as_array().cloned().unwrap_or_default();
+        assert!(failed.iter().any(|f| f["error"] == "net::ERR_CONNECTION_REFUSED"), "{failed:?}");
+
+        let out = dir.path().join("capture");
+        let captured = e.call("web_site_capture", json!({"output_directory": out.display().to_string(), "widths": [1440], "timeout_secs": 30}), cli()).unwrap();
+        let ToolOutput::Evidence(captured) = captured else { panic!("web_site_capture returns evidence") };
+        assert_eq!(captured.environment.engine, "camoufox");
+        assert_eq!(&std::fs::read(out.join("screenshot-1440.png")).unwrap()[..8], b"\x89PNG\r\n\x1a\n");
+        let capture: Value = serde_json::from_str(&std::fs::read_to_string(out.join("capture.json")).unwrap()).unwrap();
+        assert_eq!(capture["title"], "Stand-in");
+        assert!(out.join("README.md").exists());
+
+        let closed = e.call("web_site_close", json!({}), cli()).unwrap();
+        assert_eq!(closed.to_json()["result"]["closed"], true, "{}", closed.to_json());
+    }
+
+    /// Camoufox named in the settings but not installed says so, in words that say what to do
+    /// (with a Chromium present, so the precheck lets the run pick the backend).
+    #[test]
+    fn camoufox_set_but_missing_says_how_to_fix_it() {
+        use crate::tool::Caller;
+        let dir = tempfile::tempdir().unwrap();
+        let chromium = dir.path().join("chrome");
+        std::fs::write(&chromium, b"never run").unwrap();
+        let mut s = crate::testing::session();
+        s.settings.engines.tools.chromium = Some(chromium);
+        s.settings.engines.web_browser = crate::settings::WebBrowser::Camoufox;
+        let e = crate::Engine::new(s);
+        let err = e
+            .call("web_site_open", json!({"url": "http://127.0.0.1:1/"}), crate::CallOptions::new(Caller::Cli).with_consent(crate::Consent::Granted))
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::EngineMissing, "{}", err.message);
+        assert!(err.message.contains("Camoufox"), "{}", err.message);
+        assert!(err.remediation.is_some_and(|r| r.contains("web_browser")), "the way out is named");
+    }
+
+    /// With `auto` and neither browser installed, the tools say what they need before running.
+    #[test]
+    fn auto_without_any_browser_says_what_it_needs() {
+        use crate::tool::Caller;
+        let e = crate::Engine::new(crate::testing::session());
+        let err = e
+            .call("web_site_open", json!({"url": "http://127.0.0.1:1/"}), crate::CallOptions::new(Caller::Cli).with_consent(crate::Consent::Granted))
+            .unwrap_err();
+        assert!(err.message.contains("Camoufox") && err.message.contains("installed"), "{}", err.message);
+    }
+
+    /// The stand-in Camoufox helper: this test binary re-entered with `--ignored --exact` (by
+    /// the `python3` wrapper the flow test writes). It answers the helper protocol with canned
+    /// page data — no browser, no network. The work folder comes from the wrapper's
+    /// CRAFT_STANDIN_WORK.
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "stand-in started by the flow test's wrapper"]
+    fn camoufox_standin() {
+        use std::io::{BufRead, Write};
+        let work = std::env::var("CRAFT_STANDIN_WORK").map(std::path::PathBuf::from).unwrap_or_default();
+        let stdin = std::io::stdin();
+        let mut out = std::io::stdout();
+        for line in stdin.lock().lines() {
+            let Ok(line) = line else { return };
+            let Ok(req) = serde_json::from_str::<Value>(&line) else { continue };
+            let id = req.get("id").cloned().unwrap_or(Value::Null);
+            let op = req.get("op").and_then(Value::as_str).unwrap_or_default();
+            let reply = match op {
+                "open" => json!({"id": id, "ok": {"product": "Camoufox", "version": "156.0.1", "user_agent": "UA"}}),
+                "goto" => json!({"id": id, "ok": {"loaded": true, "events": [
+                    {"method": "Network.requestWillBeSent", "params": {"requestId": "1", "request": {"url": "http://127.0.0.1:1/"}}},
+                    {"method": "Network.loadingFailed", "params": {"requestId": "1", "errorText": "net::ERR_CONNECTION_REFUSED", "type": "Document"}}
+                ]}}),
+                "eval" => {
+                    let script = req.get("script").and_then(Value::as_str).unwrap_or_default();
+                    let value = if script.contains("readyState") {
+                        json!({"url": "http://127.0.0.1:1/", "title": "Stand-in", "ready": "complete", "lang": "", "width": 800, "height": 1200, "elements": 10, "images": 1, "links": 2, "forms": 0})
+                    } else if script.contains("fontFaces") {
+                        json!({"url": "http://127.0.0.1:1/", "title": "Stand-in", "outline": [{"kind": "heading", "text": "Stand-in"}], "headings": [{"text": "Stand-in"}], "links": [], "forms": [], "assets": {"images": [{"src": "i.png"}]}, "design": {}})
+                    } else if script.trim().starts_with("location.href") {
+                        json!("http://127.0.0.1:1/")
+                    } else if script.contains("outerHTML") {
+                        json!("<html><body>stand-in</body></html>")
+                    } else if script.contains("scrollHeight") {
+                        json!(1200)
+                    } else {
+                        Value::Null
+                    };
+                    json!({"id": id, "ok": {"value": value}})
+                }
+                "screenshot" => {
+                    let mut rgba = Vec::new();
+                    for _ in 0..12 {
+                        for _ in 0..16 {
+                            rgba.extend_from_slice(&[30, 102, 245, 255]);
+                        }
+                    }
+                    let png = encode_png(&Image { width: 16, height: 12, rgba }).unwrap();
+                    std::fs::write(work.join("shot-1.png"), &png).unwrap();
+                    json!({"id": id, "ok": {"file": "shot-1.png", "width": 16, "height": 12}})
+                }
+                "viewport" | "key" | "sleep" | "close" => json!({"id": id, "ok": {}}),
+                other => json!({"id": id, "error": {"message": format!("unknown op {other}")}}),
+            };
+            let mut line = reply.to_string();
+            line.push('\n');
+            let _ = out.write_all(line.as_bytes());
+            let _ = out.flush();
+        }
     }
 }
 
