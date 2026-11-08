@@ -84,6 +84,7 @@ Issues are ranked by people affected and how badly, after leaving out what's alr
 | 3 | R2.4 Runtime study, R2.5 Behaviour checks | scripted input (R2.4) before R2.5's sheet check | Makes "ready" mean more for apps and games |
 | 3 | R2.7, R2.8 | — | Small gaps left in finished work |
 | 3 | R2.9 Everyday use, R2.10 Pinned builds | — | Open to anyone at any time; most lines stand alone |
+| 3 | R2.11 Scoped rebuilds | — | A live game rebuild was checked against the site's chrome, not the game |
 | 3 | R1.5 | — | Small leftovers |
 | Any | M3: R3.3, R3.9, R3.11, R3.14 | — | Open lane |
 | Later | R4.1 macOS CLI, R4.2 Managed tier | **decision** | Not before M5 |
@@ -781,6 +782,28 @@ to the project next.
       — in PR #218
 - [ ] Opening a pin that's already running brings its window to the front, instead of a message
 - [ ] How much space pins take in Settings
+
+### R2.11 Scoped rebuilds (only what the person asks for)
+Owner: open · Status: in progress
+A game embedded in a page ("rebuild the game, ignore the rest") was studied and checked as a
+rebuild of the whole page: the check scored the site's chrome the person said to ignore (20%
+against the 90% bar) and the refine note sent the builder to copy it. What the person says to
+ignore must be data that the study and the check follow.
+- [ ] `web_site_capture` records the page's embedded views (iframe, canvas, embed, object: id,
+      title, address and its box at each captured width) as `embeds` in capture.json, addresses
+      scrubbed like the rest in Clean room
+      — claimed: claude, branch feature/r2.11-capture-embeds
+- [ ] The capture browser renders the page's graphics: WebGL works in the browser captures are
+      taken with (software rendering where the computer has no GPU), and a capture whose embedded
+      view didn't render (one colour or an error screen) says so instead of passing it off
+- [ ] A request that says what to ignore ("only the game area", "只关注游戏区域") records a typed
+      `focus` in craft.json (versioned, migrated; absent keeps today's whole-target behaviour
+      exactly), and the study captures the focused embed's own page (its address opened as a
+      site) instead of the site's other pages and chrome states
+- [ ] The check follows the focus: the build is compared only with the focused material (no other
+      pages, no chrome states, no out-of-scope text, structure or design), the refine note names
+      only in-scope differences, and a project without a focus checks byte-for-byte as today
+      (pinned by a test)
 
 ---
 
