@@ -667,6 +667,9 @@ Owner: maintainers · Status: in progress
 ### R2.9 Everyday use: typing, projects, settings
 Owner: maintainers · Status: in progress
 Gaps found while using the app for real projects.
+- [ ] A builder's second `rebuild_check` in a row can fail with "checks/round-0 already exists"
+      (seen in a live run): the self-check round folder's removal and re-creation between two asks
+      in one turn needs looking at, and the second check should say what the first is still writing
 - [x] Agent paragraphs with glossary terms and long file links wrap together without pushing
       their card or later messages under the sidebar (#523); Project and Ask bounds checked at two sizes
       — claimed: carl-dourado, branch hotfix/r2.9-523-message-width
@@ -811,6 +814,10 @@ ignore must be data that the study and the check follow.
 - [ ] A focused rebuild run live end to end on a real embedded game (study → build → check), and
       what likeness bar a game with redrawn art can reach: the 90% default may be unreachable for
       one, and the bar is kept until a real run measures it
+- [x] The focused capture waits for the game to finish loading before photographing it: a game
+      photographed seconds after the page settles is its loading screen, which the builder then
+      chases (seen on a real embedded game)
+      — claimed: claude, branch feature/r2.11-focus-settle; PR #5
 
 ---
 
