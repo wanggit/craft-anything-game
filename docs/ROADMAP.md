@@ -789,10 +789,10 @@ A game embedded in a page ("rebuild the game, ignore the rest") was studied and 
 rebuild of the whole page: the check scored the site's chrome the person said to ignore (20%
 against the 90% bar) and the refine note sent the builder to copy it. What the person says to
 ignore must be data that the study and the check follow.
-- [ ] `web_site_capture` records the page's embedded views (iframe, canvas, embed, object: id,
+- [x] `web_site_capture` records the page's embedded views (iframe, canvas, embed, object: id,
       title, address and its box at each captured width) as `embeds` in capture.json, addresses
       scrubbed like the rest in Clean room
-      — claimed: claude, branch feature/r2.11-capture-embeds
+      — claimed: claude, branch feature/r2.11-capture-embeds; PR #4
 - [ ] The capture browser renders the page's graphics: WebGL works in the browser captures are
       taken with (software rendering where the computer has no GPU), and a capture whose embedded
       view didn't render (one colour or an error screen) says so instead of passing it off
