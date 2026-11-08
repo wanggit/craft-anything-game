@@ -243,6 +243,10 @@ pub struct CheckResult {
     /// being good enough, however alike the rest looks.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub claims: Vec<Claim>,
+    /// The part of the target this check compared (the person asked for just that); none: the
+    /// whole target (R2.11).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focus: Option<String>,
 }
 
 /// One thing a build must do, checked on its own ("The start page doesn't scroll sideways at
@@ -293,6 +297,7 @@ impl CheckResult {
             pages: Vec::new(),
             unknowns: Vec::new(),
             claims: Vec::new(),
+            focus: None,
         }
     }
 
@@ -333,6 +338,8 @@ struct CheckRecord {
     unknowns: Vec<String>,
     #[serde(default)]
     claims: Vec<Claim>,
+    #[serde(default)]
+    focus: Option<String>,
 }
 
 impl From<CheckRecord> for CheckResult {
@@ -350,6 +357,7 @@ impl From<CheckRecord> for CheckResult {
             pages: r.pages,
             unknowns: r.unknowns,
             claims: r.claims,
+            focus: r.focus,
         }
     }
 }

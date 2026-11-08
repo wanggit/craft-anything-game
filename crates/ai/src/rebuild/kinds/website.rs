@@ -244,10 +244,17 @@ impl TargetKind for WebsiteKind {
 
     fn refine(&self, check: &CheckResult) -> String {
         match check.similarity {
-            Some(s) => format!(
-                "Check {}: compared with the original, your build looks {s:.0}% alike ({}). Your screenshots are in checks/round-{}/ (screenshot-<width>.png for each width, and routes/<page>/ for other pages) with the layout measured at each width in its capture.json; the original's are in capture/. Open each pair with the Read tool, fix the biggest visible differences first (layout and section order, spacing, sizes, colours, fonts, missing parts), fix the padding, items per row, sizes, colours and fonts the check names at each width with the exact values it gives, add any missing headings or words it lists, build it again, and reply with 1-2 plain sentences on what you changed.",
-                check.round, check.note, check.round
-            ),
+            Some(s) => {
+                // A focused rebuild (R2.11) has one pair to look at: the part's own capture.
+                let (folders, originals) = match &check.focus {
+                    Some(what) => (String::new(), format!("the {what}'s own capture is in capture/{}/.", FOCUS_DIR)),
+                    None => (", and routes/<page>/ for other pages".to_string(), "the original's are in capture/.".to_string()),
+                };
+                format!(
+                    "Check {}: compared with the original, your build looks {s:.0}% alike ({}). Your screenshots are in checks/round-{}/ (screenshot-<width>.png for each width{folders}) with the layout measured at each width in its capture.json; {originals} Open each pair with the Read tool, fix the biggest visible differences first (layout and section order, spacing, sizes, colours, fonts, missing parts), fix the padding, items per row, sizes, colours and fonts the check names at each width with the exact values it gives, add any missing headings or words it lists, build it again, and reply with 1-2 plain sentences on what you changed.",
+                    check.round, check.note, check.round
+                )
+            }
             None => format!(
                 "Check {}: {}\n\nFix this in app/, build again until it succeeds, and reply with 1-2 plain sentences on what you changed.",
                 check.round, check.note
@@ -695,8 +702,9 @@ fn read_json(path: &Path) -> Option<Value> {
 }
 
 /// A picture of the build against the original's, in percent: (likeness, layout, detail), then
-/// the two heights in px.
-type Likeness = (f64, f64, f64, u64, u64);
+/// the two heights in px, and whether the frames were compared as they are (the noise mask that
+/// would have left nothing to compare was dropped).
+type Likeness = (f64, f64, f64, u64, u64, bool);
 
 /// Compare the build's picture with the original's. None when either picture is missing or they
 /// couldn't be compared.
@@ -706,10 +714,21 @@ fn picture_likeness(cx: &CheckCx, original: &Path, built: &Path) -> Result<Optio
     }
     let mut params =
         json!({"before": {"path": original.display().to_string()}, "after": {"path": built.display().to_string()}, "common_area": true, "tolerance": 24});
-    // The parts of the original that change by themselves (Study's noise-<width>.png) aren't compared.
+    // The parts of the original that change by themselves (Study's noise-<width>.png) aren't
+    // compared — unless that is (almost) everything: a game that redraws every frame would leave
+    // nothing to differ and score 100% against any build. Those frames are compared as they are
+    // (animation frames never line up; the note says so), never as an empty comparison (R2.11).
     let noise =
         original.file_name().and_then(|n| n.to_str()).and_then(|n| n.strip_prefix("screenshot-")).map(|w| original.with_file_name(format!("noise-{w}")));
-    if let Some(mask) = noise.filter(|m| m.is_file()) {
+    let mut mask = noise.filter(|m| m.is_file());
+    let mut as_is = false;
+    if let Some(m) = &mask
+        && mask_hides_everything(m, original).unwrap_or(false)
+    {
+        as_is = true;
+        mask = None;
+    }
+    if let Some(mask) = mask {
         params["ignore"] = json!({"path": mask.display().to_string()});
     }
     let r = cx.call("web_pixels_compare", params)?;
@@ -719,7 +738,38 @@ fn picture_likeness(cx: &CheckCx, original: &Path, built: &Path) -> Result<Optio
     // Layout alone is generous to mostly empty pages; detail (SSIM) sees text and edges.
     let detail = res.get("perceptual_similarity").and_then(Value::as_f64).unwrap_or(layout);
     let h = |k: &str| res.pointer(&format!("/sizes/{k}/height")).and_then(Value::as_u64).unwrap_or(0);
-    Ok(Some(((layout + detail) * 50.0, layout * 100.0, detail * 100.0, h("before"), h("after"))))
+    Ok(Some(((layout + detail) * 50.0, layout * 100.0, detail * 100.0, h("before"), h("after"), as_is)))
+}
+
+/// Whether the noise mask covers (almost) every tile of the original's picture: nothing would be
+/// left to compare, so the mask must not be used (R2.11).
+fn mask_hides_everything(mask: &Path, original: &Path) -> Result<bool, ToolError> {
+    use craft_anything_engine::tools::web_common::{NoiseMask, png_dimensions};
+    let img = std::fs::read(original).map_err(|e| ToolError::io(original.display(), e))?;
+    let (w, h) = png_dimensions(&img)?;
+    let bytes = std::fs::read(mask).map_err(|e| ToolError::io(mask.display(), e))?;
+    let mask = NoiseMask::from_png(&bytes)?;
+    let tile = u64::from(mask.tile.max(1));
+    let tiles = (u64::from(w).div_ceil(tile) * u64::from(h).div_ceil(tile)).max(1);
+    Ok(mask.count() as u64 * 10 >= tiles * 9)
+}
+
+/// Where a web check's originals come from (R2.11): the focused part's own capture alone when
+/// the person asked for one part, else the whole capture with everything studied.
+fn check_scope(ws: &Workspace) -> PathBuf {
+    match &ws.manifest.focus {
+        Some(_) => ws.capture_dir().join(FOCUS_DIR),
+        None => ws.capture_dir(),
+    }
+}
+
+/// "the game area" → "The game area", for a claim's title.
+fn capitalized(what: &str) -> String {
+    let mut c = what.chars();
+    match c.next() {
+        Some(f) => format!("{}{}", f.to_uppercase(), c.as_str()),
+        None => "The part".to_string(),
+    }
 }
 
 /// Open the build's menus, pop-ups and tabs the way the study opened the original's in `dir`
@@ -798,20 +848,31 @@ impl Check for WebVisualCheck {
             let _ = std::fs::remove_dir_all(&out);
         }
         std::fs::create_dir_all(ws.checks_dir()).map_err(|e| ToolError::io(ws.checks_dir().display(), e))?;
-        // The start page, then every other page studied: the same path on the build.
-        let mut pages = vec![("start page".to_string(), String::new(), base.clone())];
-        for r in routes(ws) {
-            let url = format!("{}{}", base.trim_end_matches('/'), r.path);
-            pages.push((r.path.clone(), format!("routes/{}", r.slug), url));
+        // A focused rebuild (R2.11) compares only its part — the part's own capture against the
+        // build — and everything the person scoped out (the page around it, its other pages and
+        // its menus) stays un-compared. Without a focus, everything is compared exactly as ever.
+        let focus = ws.manifest.focus.clone();
+        let originals = check_scope(ws);
+        let mut notes = Vec::new();
+        if let Some(f) = &focus {
+            notes.push(format!("Only the {} is compared — the person asked for just that part, and the page around it is out of scope.", f.what));
+        }
+        // The start page (or the focused part), then every other page studied: the same path on
+        // the build.
+        let mut pages = vec![(focus.as_ref().map_or_else(|| "start page".to_string(), |f| f.what.clone()), String::new(), base.clone())];
+        if focus.is_none() {
+            for r in routes(ws) {
+                let url = format!("{}{}", base.trim_end_matches('/'), r.path);
+                pages.push((r.path.clone(), format!("routes/{}", r.slug), url));
+            }
         }
         let mut scores = Vec::new();
         let mut likeness = Vec::new();
-        let mut notes = Vec::new();
         let mut artifacts = Vec::new();
         let mut unknowns = Vec::new();
         let mut claims = Vec::new();
         for (name, dir, url) in &pages {
-            let (original, built) = if dir.is_empty() { (ws.capture_dir(), out.clone()) } else { (ws.capture_dir().join(dir), out.join(dir)) };
+            let (original, built) = if dir.is_empty() { (originals.clone(), out.clone()) } else { (originals.join(dir), out.join(dir)) };
             // web_site_capture creates the page's own folder (it must not exist yet) inside one
             // that does.
             if let Some(parent) = built.parent() {
@@ -823,8 +884,8 @@ impl Check for WebVisualCheck {
             for &w in &widths {
                 let (a, b) = (original.join(format!("screenshot-{w}.png")), built.join(format!("screenshot-{w}.png")));
                 match picture_likeness(cx, &a, &b)? {
-                    Some((s, l, d, hb, ha)) => {
-                        per_width.push((w, s, l, d, hb, ha));
+                    Some((s, l, d, hb, ha, as_is)) => {
+                        per_width.push((w, s, l, d, hb, ha, as_is));
                         artifacts.extend(b.strip_prefix(&ws.root).ok().map(Path::to_path_buf));
                     }
                     // A width the original was never pictured at is outside what was studied;
@@ -842,12 +903,15 @@ impl Check for WebVisualCheck {
             likeness.push(PageLikeness { name: name.clone(), dir: dir.clone(), similarity: score });
             let widths = per_width
                 .iter()
-                .map(|(w, s, l, d, hb, ha)| format!("{w} px: {s:.0}% alike (layout {l:.0}%, detail {d:.0}%; page height {hb} vs {ha} px)"))
+                .map(|(w, s, l, d, hb, ha, as_is)| {
+                    let moved = if *as_is { ", compared frame to frame: the picture moves on its own" } else { "" };
+                    format!("{w} px: {s:.0}% alike (layout {l:.0}%, detail {d:.0}%; page height {hb} vs {ha} px{moved})")
+                })
                 .collect::<Vec<_>>()
                 .join("; ");
             // The page's words, parts and measured design too: a build can look alike and still
             // miss words, or get the padding, colours and fonts wrong at some width.
-            let page = if dir.is_empty() { "The start page".to_string() } else { name.clone() };
+            let page = if dir.is_empty() { focus.as_ref().map_or_else(|| "The start page".to_string(), |f| capitalized(&f.what)) } else { name.clone() };
             let text = match (read_json(&original.join("capture.json")), read_json(&built.join("capture.json"))) {
                 (Some(o), Some(b)) => {
                     claims.extend(page_claims(&page, &o, &b));
@@ -866,8 +930,10 @@ impl Check for WebVisualCheck {
         if scores.is_empty() {
             return Ok(CheckResult::new(self.id(), round, false, "The build couldn't be compared with the original."));
         }
-        for dir in state_dirs(&ws.capture_dir()) {
-            notes.extend(states_note(cx, &base, &out, &dir, &mut unknowns, &mut claims)?);
+        if focus.is_none() {
+            for dir in state_dirs(&ws.capture_dir()) {
+                notes.extend(states_note(cx, &base, &out, &dir, &mut unknowns, &mut claims)?);
+            }
         }
         let failed: Vec<String> = claims.iter().filter(|c| !c.passed).map(|c| format!("{} ({})", c.title, c.detail)).collect();
         if !failed.is_empty() {
@@ -879,7 +945,15 @@ impl Check for WebVisualCheck {
         let avg = scores.iter().sum::<f64>() / scores.len() as f64;
         // One page needs no list; with several, each one's likeness is kept for the project page.
         let pages = if likeness.len() > 1 { likeness } else { Vec::new() };
-        Ok(CheckResult { similarity: Some(avg), artifacts, pages, unknowns, claims, ..CheckResult::new(self.id(), round, true, notes.join(" | ")) })
+        Ok(CheckResult {
+            similarity: Some(avg),
+            artifacts,
+            pages,
+            unknowns,
+            claims,
+            focus: focus.map(|f| f.what),
+            ..CheckResult::new(self.id(), round, true, notes.join(" | "))
+        })
     }
 }
 
@@ -941,5 +1015,49 @@ mod tests {
         let missing = Focus { what: "the game area".into(), element_id: Some("nope".into()) };
         assert_eq!(pick_focus_embed(&capture, &missing).unwrap()["tag"], "iframe", "no such id: the biggest again");
         assert!(pick_focus_embed(&json!({}), &biggest).is_none(), "no embeds: nothing to pick");
+    }
+
+    /// R2.11: a project's focus decides where the originals come from and what the page label
+    /// says; without one nothing changes.
+    #[test]
+    fn the_focus_decides_what_gets_compared() {
+        let d = tempfile::tempdir().unwrap();
+        let mut ws = Workspace::create(d.path(), "Site", "Clone the game, only the game area", TargetRef::Website { url: "https://x/".into() }).unwrap();
+        assert_eq!(check_scope(&ws), ws.capture_dir(), "no focus: the whole capture");
+        assert_eq!(capitalized("the game area"), "The game area");
+        ws.manifest.focus = Some(Focus { what: "the game area".into(), element_id: None });
+        assert_eq!(check_scope(&ws), ws.capture_dir().join(FOCUS_DIR), "a focus: its part's own capture");
+    }
+
+    /// R2.11: a noise mask over (almost) the whole picture must not be used — it would leave
+    /// nothing to differ and score 100% against any build. Most of a picture masked still
+    /// compares what is left.
+    #[test]
+    fn a_mask_over_everything_is_dropped_not_trusted() {
+        use craft_anything_engine::tools::web_common::{Image, NoiseMask, encode_png};
+        let d = tempfile::tempdir().unwrap();
+        let png = encode_png(&Image { width: 64, height: 64, rgba: vec![0; 64 * 64 * 4] }).unwrap();
+        let original = d.path().join("screenshot-64.png");
+        std::fs::write(&original, &png).unwrap();
+        let full = d.path().join("noise-full.png");
+        std::fs::write(&full, NoiseMask { tile: 16, cols: 4, rows: 4, bits: vec![true; 16] }.to_png().unwrap()).unwrap();
+        assert!(mask_hides_everything(&full, &original).unwrap(), "everything is masked");
+        let half = d.path().join("noise-half.png");
+        std::fs::write(&half, NoiseMask { tile: 16, cols: 4, rows: 4, bits: (0..16).map(|i| i < 6).collect() }.to_png().unwrap()).unwrap();
+        assert!(!mask_hides_everything(&half, &original).unwrap(), "most of the picture still compares");
+    }
+
+    /// R2.11: the refine note names the part's own capture for a focused rebuild (one pair to
+    /// look at, no other pages), and is byte-for-byte the same as ever without a focus.
+    #[test]
+    fn the_refine_note_matches_what_was_compared() {
+        let focused = CheckResult { focus: Some("the game area".into()), similarity: Some(50.0), ..CheckResult::new(CheckResult::WEB_VISUAL, 1, true, "note") };
+        let r = WebsiteKind.refine(&focused);
+        assert!(r.contains("the game area's own capture is in capture/focus/") && !r.contains("routes/"), "{r}");
+        let whole = CheckResult { similarity: Some(50.0), ..CheckResult::new(CheckResult::WEB_VISUAL, 1, true, "note") };
+        let r = WebsiteKind.refine(&whole);
+        assert!(r.starts_with("Check 1: compared with the original, your build looks 50% alike (note)."), "{r}");
+        assert!(r.contains("screenshot-<width>.png for each width, and routes/<page>/ for other pages"), "{r}");
+        assert!(r.contains("the original's are in capture/. Open each pair with the Read tool"), "{r}");
     }
 }

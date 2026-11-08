@@ -180,6 +180,13 @@
             "$ref": "#/$defs/Claim"
           }
         },
+        "focus": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
         "good_enough": {
           "type": [
             "number",
