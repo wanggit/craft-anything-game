@@ -39,7 +39,7 @@ pub fn specs() -> Vec<ToolSpec> {
         spec(
             "web_site_capture",
             "Capture a website for rebuilding",
-            "Record the open website into a new folder: full-page PNG screenshots at each requested width, the rendered HTML, design tokens (fonts, sizes, weights, text and background colours as hex, radii, shadows, spacing, content widths, CSS custom properties), the widths its CSS switches layout at, the layout at each width (page width, heading and text sizes, each section's padding, gap, content column and items per row), a layout outline of visible landmarks, headings, controls and images with positions, asset lists (images, stylesheets, scripts, font files, the requests it made), links and form outlines (never values). Writes capture.json and a README.md summary.",
+            "Record the open website into a new folder: full-page PNG screenshots at each requested width, the rendered HTML, design tokens (fonts, sizes, weights, text and background colours as hex, radii, shadows, spacing, content widths, CSS custom properties), the widths its CSS switches layout at, the layout at each width (page width, heading and text sizes, each section's padding, gap, content column and items per row), a layout outline of visible landmarks, headings, controls and images with positions, the page's embedded views (iframe, canvas, embed, object: id, title, address and box at each width), asset lists (images, stylesheets, scripts, font files, the requests it made), links and form outlines (never values). Writes capture.json and a README.md summary.",
             "Save pictures and a blueprint of a web page so it can be rebuilt.",
             Toolset::Browser,
             Effects::EVIDENCE.union(Effects::WRITES_FILESYSTEM).union(Effects::ACCESSES_NETWORK),
@@ -690,8 +690,24 @@ const LAYOUT_JS: &str = r#"(() => {
     }
     blocks.push(b);
   }
+  // The page's embedded views (a game in an iframe, a canvas app): what each is and where it
+  // sits. `ord` is the element's order among the same tag whether shown or not, so the same view
+  // is found again at another width even when a width hides one of them.
+  const frames = [];
+  const counts = {};
+  for (const el of document.querySelectorAll('iframe,canvas,embed,object')) {
+    const tag = el.tagName.toLowerCase();
+    const ord = (counts[tag] = (counts[tag] || 0) + 1);
+    if (frames.length >= 32 || !shown(el)) continue;
+    const r = el.getBoundingClientRect();
+    const f = {tag, ord, box: {x: Math.round(r.x + scrollX), y: Math.round(r.y + scrollY), w: Math.round(r.width), h: Math.round(r.height)}};
+    if (el.id) f.id = cap(el.id, 60);
+    const t = el.title || el.getAttribute('aria-label') || ''; if (t) f.title = cap(t, 80);
+    const src = el.src || el.getAttribute('data-src') || el.data || ''; if (src) f.src = String(src);
+    frames.push(f);
+  }
   return {page_w: document.documentElement.scrollWidth, page_h: document.documentElement.scrollHeight,
-    type: {h1: size('h1'), h2: size('h2'), h3: size('h3'), body: size('p')}, blocks};
+    type: {h1: size('h1'), h2: size('h2'), h3: size('h3'), body: size('p')}, blocks, frames};
 })()"#;
 
 fn web_site_capture(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, ToolError> {
@@ -749,12 +765,13 @@ fn web_site_capture(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, Tool
     write_new_file(&out, &["capture.json".into()], &capture_json).map_err(ToolError::invalid)?;
 
     let summary = format!(
-        "Captured {shown}: {} screenshot(s), {} outline items, {} headings, {images} images, {} links, {} forms → {}.",
+        "Captured {shown}: {} screenshot(s), {} outline items, {} headings, {images} images, {} links, {} forms, {} embedded views → {}.",
         shots.len(),
         n("outline"),
         n("headings"),
         n("links"),
         n("forms"),
+        n("embeds"),
         out.display()
     );
     let ev = EvidenceBuilder::new("web_site_capture", Subject { kind: "website".into(), sha256: None, name: Some(shown.clone()) }, site.env(ctx.session.clean_room()))
@@ -765,7 +782,8 @@ fn web_site_capture(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, Tool
             "title": blueprint.get("title"),
             "screenshots": shots,
             "html_bytes": html_bytes,
-            "counts": {"outline": n("outline"), "headings": n("headings"), "links": n("links"), "forms": n("forms"), "images": images},
+            "counts": {"outline": n("outline"), "headings": n("headings"), "links": n("links"), "forms": n("forms"), "images": images, "embeds": n("embeds")},
+            "embeds": blueprint.get("embeds"),
             "design": blueprint.get("design"),
             "files": ["README.md", "capture.json"],
         }))
@@ -803,6 +821,7 @@ fn capture_into(ctx: &Ctx<'_>, page: &mut dyn PageConn, out: &Path, p: &CaptureP
     let mut shots = Vec::new();
     let mut blueprint = Value::Null;
     let mut layouts = Vec::new();
+    let mut embeds: Vec<Value> = Vec::new();
     for (i, &w) in p.widths.iter().enumerate() {
         ctx.report(Some(i as f32 / p.widths.len() as f32), format!("Photographing the page at {w} px…"));
         page.set_viewport(w, 900, dl)?;
@@ -815,8 +834,13 @@ fn capture_into(ctx: &Ctx<'_>, page: &mut dyn PageConn, out: &Path, p: &CaptureP
         }
         // A page whose layout can't be read is still photographed.
         if let Ok(Value::Object(mut layout)) = page.eval(LAYOUT_JS, dl) {
+            let frames = match layout.remove("frames") {
+                Some(Value::Array(f)) => f,
+                _ => Vec::new(),
+            };
             layout.insert("width".into(), json!(w));
             layouts.push(Value::Object(layout));
+            merge_frames(&mut embeds, frames, w);
         }
         let height = page
             .eval("Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0)", dl)?
@@ -851,6 +875,9 @@ fn capture_into(ctx: &Ctx<'_>, page: &mut dyn PageConn, out: &Path, p: &CaptureP
     }
     if let Value::Object(b) = &mut blueprint {
         b.insert("layouts".into(), Value::Array(layouts));
+        if !embeds.is_empty() {
+            b.insert("embeds".into(), Value::Array(embeds));
+        }
     }
     let mut html_bytes = (0, 0);
     if p.include_html {
@@ -861,6 +888,58 @@ fn capture_into(ctx: &Ctx<'_>, page: &mut dyn PageConn, out: &Path, p: &CaptureP
         write_new_file(out, &["page.html".into()], kept.as_bytes()).map_err(ToolError::invalid)?;
     }
     Ok((blueprint, shots, html_bytes))
+}
+
+/// Merge one width's embedded views (`frames` from [`LAYOUT_JS`]) into `embeds` across widths: the
+/// same view at another width is found by id, else by address, else by its order among the views
+/// of the same tag (`ord`, counted whether shown or not). Each embed keeps the box it had at every
+/// width it showed at, so a game in an iframe can be cropped out of any screenshot later.
+fn merge_frames(embeds: &mut Vec<Value>, frames: Vec<Value>, width: u32) {
+    for f in frames.into_iter().take(32) {
+        if !f.is_object() {
+            continue;
+        }
+        let text = |k: &str| f.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
+        let (tag, id, src) = (text("tag"), text("id"), text("src"));
+        let ord = f.get("ord").and_then(Value::as_u64);
+        let num = |k: &str| f.get("box").and_then(|b| b.get(k)).and_then(Value::as_i64).unwrap_or(0);
+        let placed = json!({"width": width, "x": num("x"), "y": num("y"), "w": num("w"), "h": num("h")});
+        // The same view at another width: by id when it has one (two views may share an address),
+        // else by address, else by its order among the views of the same tag (`ord` counts shown
+        // and hidden alike) — only against an embed with neither id nor address of its own.
+        let hit = if !id.is_empty() {
+            embeds.iter().position(|e| e.get("id").and_then(Value::as_str) == Some(id.as_str()))
+        } else if !src.is_empty() {
+            embeds.iter().position(|e| e.get("src").and_then(Value::as_str) == Some(src.as_str()))
+        } else {
+            embeds.iter().position(|e| {
+                e.get("id").and_then(Value::as_str).unwrap_or_default().is_empty()
+                    && e.get("src").and_then(Value::as_str).unwrap_or_default().is_empty()
+                    && e.get("tag").and_then(Value::as_str).unwrap_or_default() == tag
+                    && e.get("ord").and_then(Value::as_u64) == ord
+            })
+        };
+        match hit.and_then(|i| embeds.get_mut(i)) {
+            Some(e) => {
+                if let Some(boxes) = e.get_mut("boxes").and_then(Value::as_array_mut) {
+                    boxes.push(placed);
+                }
+            }
+            None => {
+                let mut e = json!({"tag": tag, "ord": ord.unwrap_or(0), "boxes": [placed]});
+                if !id.is_empty() {
+                    e["id"] = json!(id);
+                }
+                if !src.is_empty() {
+                    e["src"] = json!(src);
+                }
+                if !text("title").is_empty() {
+                    e["title"] = json!(text("title"));
+                }
+                embeds.push(e);
+            }
+        }
+    }
 }
 
 fn truncate_utf8(s: &str, max: usize) -> &str {
@@ -893,6 +972,11 @@ fn visitor_view(blueprint: &mut Value) {
             item.remove("class");
             item.get_mut("src").map(bare);
             item.get_mut("href").map(bare);
+        }
+    }
+    if let Some(Value::Array(embeds)) = b.get_mut("embeds") {
+        for e in embeds.iter_mut().filter_map(Value::as_object_mut) {
+            e.get_mut("src").map(bare);
         }
     }
     if let Some(Value::Array(links)) = b.get_mut("links") {
@@ -958,10 +1042,10 @@ fn readme(b: &Value, shots: &[Value], (html_bytes, html_total): (usize, usize), 
         md.push_str(&format!("- `page.html` — rendered HTML ({html_bytes} bytes{cut})\n"));
     }
     if visitor {
-        md.push_str("- `capture.json` — design tokens, the layout at each width (`layouts`), layout outline (positions in CSS px), headings, links, forms, picture sizes and visible text\n\n");
+        md.push_str("- `capture.json` — design tokens, the layout at each width (`layouts`), layout outline (positions in CSS px), embedded views (`embeds`), headings, links, forms, picture sizes and visible text\n\n");
         md.push_str("Clean room: only what a visitor sees was kept. The page's HTML, CSS rules, scripts, requests and errors weren't read.\n\n");
     } else {
-        md.push_str("- `capture.json` — design tokens, breakpoints, the layout at each width (`layouts`), layout outline (positions in CSS px), headings, links, forms, assets and visible text\n\n");
+        md.push_str("- `capture.json` — design tokens, breakpoints, the layout at each width (`layouts`), layout outline (positions in CSS px), embedded views (`embeds`), headings, links, forms, assets and visible text\n\n");
     }
     md.push_str("## Design at a glance\n\n");
     md.push_str(&format!("- Fonts: {}\n", top("/design/fonts", 4)));
@@ -979,6 +1063,30 @@ fn readme(b: &Value, shots: &[Value], (html_bytes, html_total): (usize, usize), 
     md.push_str(&layout_section(b, visitor));
     if !visitor {
         md.push_str(&health_section(b));
+    }
+    let embeds: Vec<&Value> = b.pointer("/embeds").and_then(Value::as_array).into_iter().flatten().collect();
+    if !embeds.is_empty() {
+        md.push_str("## Embedded views\n\n");
+        md.push_str("What the page shows inside it (a game, a player, a map); where each sits at every width is in `capture.json` (`embeds`).\n\n");
+        for e in embeds.iter().take(12) {
+            let tag = e.get("tag").and_then(Value::as_str).unwrap_or("embed");
+            let title = e.get("title").and_then(Value::as_str).unwrap_or_default();
+            let id = e.get("id").and_then(Value::as_str).unwrap_or_default();
+            let src = e.get("src").and_then(Value::as_str).unwrap_or_default();
+            let mut line = format!("- {tag}");
+            if !title.is_empty() {
+                line.push_str(&format!(" \"{title}\""));
+            }
+            if !id.is_empty() {
+                line.push_str(&format!(" (id {id})"));
+            }
+            if !src.is_empty() {
+                line.push_str(&format!(" — {}", shown_url(src)));
+            }
+            md.push_str(&line);
+            md.push('\n');
+        }
+        md.push('\n');
     }
     md.push_str("## Headings\n\n");
     for h in b.pointer("/headings").and_then(Value::as_array).into_iter().flatten().take(40) {
@@ -1252,6 +1360,69 @@ mod tests {
             "{md}"
         );
         assert!(md.contains("### 1440 px"), "{md}");
+    }
+
+    /// R2.11: a view embedded in the page (a game in an iframe) is found again at every width —
+    /// by id, else by address, else by its order among the same tag — and keeps the box it had
+    /// at each, so a later step can crop it out of any screenshot.
+    #[test]
+    fn embedded_views_are_matched_across_widths_by_id_address_then_order() {
+        let frame = |tag: &str, id: &str, src: &str, ord: u32, x: i64| json!({"tag": tag, "id": id, "src": src, "ord": ord, "box": {"x": x, "y": 10, "w": 640, "h": 480}});
+        let mut embeds = Vec::new();
+        merge_frames(&mut embeds, vec![frame("iframe", "game-iframe", "https://g.test/play", 1, 100), frame("canvas", "", "", 1, 0)], 1440);
+        merge_frames(&mut embeds, vec![frame("iframe", "game-iframe", "https://g.test/play", 1, 20), frame("canvas", "", "", 1, 0)], 390);
+        assert_eq!(embeds.len(), 2);
+        let game = &embeds[0];
+        assert_eq!(game["id"], "game-iframe");
+        assert_eq!(game["tag"], "iframe");
+        assert_eq!(game["src"], "https://g.test/play");
+        assert!(game.get("title").is_none(), "no title in the frames");
+        let boxes = game["boxes"].as_array().unwrap();
+        assert_eq!(boxes.len(), 2, "one box per width it showed at");
+        assert_eq!((boxes[0]["width"].as_u64(), boxes[0]["x"].as_i64()), (Some(1440), Some(100)));
+        assert_eq!((boxes[1]["width"].as_u64(), boxes[1]["x"].as_i64()), (Some(390), Some(20)));
+        // An unnamed, address-less canvas is its order among canvases, shown or not.
+        merge_frames(&mut embeds, vec![frame("canvas", "", "", 2, 5), frame("canvas", "", "", 1, 0)], 768);
+        assert_eq!(embeds.len(), 3, "the second canvas is not the first");
+        assert_eq!((embeds[1]["boxes"].as_array().map(Vec::len), embeds[2]["boxes"].as_array().map(Vec::len)), (Some(3), Some(1)));
+        // Same address, no id: the same view.
+        merge_frames(&mut embeds, vec![frame("iframe", "", "https://g.test/play", 2, 8)], 768);
+        assert_eq!(embeds.len(), 3, "matched by address");
+        assert_eq!(embeds[0]["boxes"].as_array().unwrap().len(), 3);
+        // Two views of one address are two views (a game in a desktop and a phone frame).
+        merge_frames(&mut embeds, vec![frame("iframe", "second", "https://g.test/play", 3, 9)], 768);
+        assert_eq!(embeds.len(), 4, "same address, another id: another view");
+        assert_eq!(embeds[3]["id"], "second");
+    }
+
+    /// R2.11: a visitor sees the embedded view and its address, but not the query strings on it.
+    #[test]
+    fn visitor_view_keeps_embeds_but_strips_their_query_strings() {
+        let mut b = json!({
+            "embeds": [
+                {"tag": "iframe", "id": "game-iframe", "title": "Sprunki", "src": "https://g.test/play?token=abc#x",
+                 "boxes": [{"width": 1440, "x": 85, "y": 75, "w": 1000, "h": 520}]},
+                {"tag": "canvas", "boxes": [{"width": 1440, "x": 0, "y": 0, "w": 300, "h": 150}]}
+            ]
+        });
+        visitor_view(&mut b);
+        assert_eq!(b["embeds"][0]["src"], "https://g.test/play");
+        assert_eq!(b["embeds"][0]["title"], "Sprunki");
+        assert_eq!(b["embeds"][0]["boxes"][0]["w"], 1000);
+        assert_eq!(b["embeds"][1]["tag"], "canvas");
+    }
+
+    /// R2.11: the README names what the page embeds (and says nothing when it embeds nothing).
+    #[test]
+    fn readme_names_the_embedded_views() {
+        let b = json!({"url": "https://ex.com/", "embeds": [
+            {"tag": "iframe", "id": "game-iframe", "title": "Sprunki", "src": "https://g.test/play"},
+            {"tag": "canvas", "boxes": []}
+        ]});
+        let md = readme(&b, &[], (0, 0), true);
+        assert!(md.contains("## Embedded views") && md.contains("iframe \"Sprunki\" (id game-iframe) — https://g.test/play"), "{md}");
+        assert!(md.contains("- canvas\n"), "{md}");
+        assert!(!readme(&json!({"url": "https://ex.com/"}), &[], (0, 0), true).contains("Embedded views"), "nothing embedded, no section");
     }
 
     #[test]
