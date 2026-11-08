@@ -17,18 +17,24 @@ impl Worker {
                 // The widths the check compares at, so every picture has its pair.
                 let widths = self.engine.session().settings.build.widths();
                 self.call("web_site_capture", json!({"output_directory": capture.display().to_string(), "widths": widths, "noise_pass": true}))?;
-                // Menus, pop-ups and tabs, one at a time, on a computer and on a phone (where a menu
-                // button often replaces the navigation); a page without them (or a failure) is fine.
-                self.step(ws, Step::Study, Status::Inspecting, "Opening its menus, pop-ups and tabs…")?;
-                let mut views = vec![(kinds::website::STATES_DIR.to_string(), widths.first().copied().unwrap_or(1440))];
-                views.extend(kinds::website::phone_width(&widths).map(|w| (kinds::website::phone_states_dir(w), w)));
-                for (dir, width) in views {
-                    let states = capture.join(dir);
-                    if let Err(e) = self.call("web_page_states_capture", json!({"output_directory": states.display().to_string(), "width": width})) {
-                        self.step(ws, Step::Study, Status::Inspecting, &format!("Couldn't open its menus and pop-ups at {width} px: {}", e.message))?;
+                if let Some(focus) = ws.manifest.focus.clone() {
+                    // The person asked for one part of the page only (R2.11): capture that part
+                    // on its own, and leave the page's menus and other pages out of it.
+                    self.capture_focus(ws, &focus)?;
+                } else {
+                    // Menus, pop-ups and tabs, one at a time, on a computer and on a phone (where a menu
+                    // button often replaces the navigation); a page without them (or a failure) is fine.
+                    self.step(ws, Step::Study, Status::Inspecting, "Opening its menus, pop-ups and tabs…")?;
+                    let mut views = vec![(kinds::website::STATES_DIR.to_string(), widths.first().copied().unwrap_or(1440))];
+                    views.extend(kinds::website::phone_width(&widths).map(|w| (kinds::website::phone_states_dir(w), w)));
+                    for (dir, width) in views {
+                        let states = capture.join(dir);
+                        if let Err(e) = self.call("web_page_states_capture", json!({"output_directory": states.display().to_string(), "width": width})) {
+                            self.step(ws, Step::Study, Status::Inspecting, &format!("Couldn't open its menus and pop-ups at {width} px: {}", e.message))?;
+                        }
                     }
+                    self.capture_routes(ws, &url, &widths)?;
                 }
-                self.capture_routes(ws, &url, &widths)?;
                 if !self.engine.session().clean_room() {
                     self.how_it_works(ws, &url)?;
                 }
@@ -227,6 +233,55 @@ impl Worker {
         Ok(kept)
     }
 
+    /// The focused part's own capture (R2.11) into capture/focus/: the view the person asked for,
+    /// on its own. An embedded view with an address is opened and captured like a small site (the
+    /// game as anyone can open it); one without an address, or that won't open on its own (some
+    /// games only run inside the page they came from), is cut out of the page's screenshots.
+    fn capture_focus(&mut self, ws: &mut Workspace, focus: &craft_anything_engine::workspace::Focus) -> Result<(), ToolError> {
+        let widths = self.engine.session().settings.build.widths();
+        let capture = ws.capture_dir();
+        let out = capture.join(kinds::website::FOCUS_DIR);
+        let doc = std::fs::read(capture.join("capture.json")).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()).unwrap_or(Value::Null);
+        let Some(embed) = kinds::website::pick_focus_embed(&doc, focus).cloned() else {
+            self.step(
+                ws,
+                Step::Study,
+                Status::Inspecting,
+                &format!("No embedded view (the {}) was found in the page: the whole page is what gets rebuilt.", focus.what),
+            )?;
+            return Ok(());
+        };
+        let src = embed.get("src").and_then(Value::as_str).unwrap_or_default().to_string();
+        if !src.is_empty() {
+            self.step(ws, Step::Study, Status::Inspecting, &format!("Photographing the {} on its own…", focus.what))?;
+            let got = self.call("web_site_open", json!({"url": src})).and_then(|_| {
+                self.call(
+                    "web_site_capture",
+                    json!({"output_directory": out.display().to_string(), "include_html": false, "noise_pass": true, "widths": widths}),
+                )
+            });
+            match got {
+                Ok(_) => return Ok(()),
+                Err(e) => self.step(
+                    ws,
+                    Step::Study,
+                    Status::Inspecting,
+                    &format!("The {} wouldn't open on its own ({}); cutting it out of the page's screenshots instead.", focus.what, e.message),
+                )?,
+            }
+        }
+        match crop_focus_into(&capture, &out, &embed)? {
+            0 => self.step(
+                ws,
+                Step::Study,
+                Status::Inspecting,
+                &format!("The {} couldn't be cut out of the page's screenshots: the whole page is what gets compared.", focus.what),
+            )?,
+            n => self.step(ws, Step::Study, Status::Inspecting, &format!("Cut the {} out of the page's screenshots at {n} width(s).", focus.what))?,
+        }
+        Ok(())
+    }
+
     /// Deep mode with Ghidra installed: run Ghidra's one-time analysis of `program` on its own
     /// thread; the receiver gets its result. The builder's tools share the analysis (waiting for it
     /// rather than starting another), and it carries on if the person pauses, so nothing is lost.
@@ -264,6 +319,38 @@ impl Worker {
 /// Deep mode's notes on how a website works, in capture/.
 pub(super) const HOW_IT_WORKS: &str = "how-it-works.md";
 
+/// Cut the focused view's boxes out of the page's screenshots into `out`, one per width the view
+/// showed at, with the noise masks cut to match (what moves by itself stays un-compared). The box
+/// is in CSS pixels at its width; the screenshot may be scaled. Returns how many widths were cut
+/// (R2.11).
+pub(super) fn crop_focus_into(capture: &Path, out: &Path, embed: &Value) -> Result<usize, ToolError> {
+    use craft_anything_engine::tools::web_common::{Clip, NoiseMask, crop_png, png_dimensions};
+    std::fs::create_dir_all(out).map_err(|e| ToolError::io(out.display(), e))?;
+    let mut cut = 0;
+    for b in embed.get("boxes").and_then(Value::as_array).into_iter().flatten() {
+        let width = b.get("width").and_then(Value::as_u64).unwrap_or(0);
+        let num = |k: &str| b.get(k).and_then(Value::as_i64).unwrap_or(0);
+        if width == 0 || num("w") <= 0 || num("h") <= 0 {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(capture.join(format!("screenshot-{width}.png"))) else { continue };
+        let (pw, _) = png_dimensions(&bytes)?;
+        let scale = f64::from(pw) / width as f64;
+        let clip = Clip { x: num("x") as f64 * scale, y: num("y") as f64 * scale, width: num("w") as f64 * scale, height: num("h") as f64 * scale };
+        craft_anything_engine::project::write_atomic(&out.join(format!("screenshot-{width}.png")), &crop_png(&bytes, clip)?)?;
+        if let Ok(mask) = std::fs::read(capture.join(format!("noise-{width}.png")))
+            && let Ok(mask) = NoiseMask::from_png(&mask)
+        {
+            let x = clip.x.max(0.0) as u32;
+            let y = clip.y.max(0.0) as u32;
+            let region = mask.region(x, y, clip.width.max(1.0) as u32, clip.height.max(1.0) as u32);
+            craft_anything_engine::project::write_atomic(&out.join(format!("noise-{width}.png")), &region.to_png()?)?;
+        }
+        cut += 1;
+    }
+    Ok(cut)
+}
+
 /// A short text view of a tool result for the study notes.
 pub(super) fn describe(out: &ToolOutput) -> String {
     match out {
@@ -272,5 +359,44 @@ pub(super) fn describe(out: &ToolOutput) -> String {
             format!("{}\n\nEvidence {}.\n\n```json\n{}\n```\n", e.summary, e.id, body.chars().take(20_000).collect::<String>())
         }
         ToolOutput::Value(v) => format!("```json\n{}\n```\n", serde_json::to_string_pretty(v).unwrap_or_default().chars().take(20_000).collect::<String>()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use craft_anything_engine::tools::web_common::{Image, NoiseMask, decode_png, encode_png};
+
+    /// R2.11: the focused view cut out of the page's screenshots: its box at each width it showed
+    /// at, with the noise mask cut to match (what moves beside it stays out of the cut).
+    #[test]
+    fn the_focus_is_cut_out_of_the_screenshots() {
+        let d = tempfile::tempdir().unwrap();
+        let (capture, out) = (d.path().join("capture"), d.path().join("focus"));
+        std::fs::create_dir_all(&capture).unwrap();
+        // A 40×30 page: red on the left, blue on the right; the view is the right half.
+        let mut rgba = Vec::new();
+        for _ in 0..30 {
+            for x in 0..40 {
+                rgba.extend_from_slice(&if x < 20 { [255, 0, 0, 255] } else { [0, 0, 255, 255] });
+            }
+        }
+        std::fs::write(capture.join("screenshot-40.png"), encode_png(&Image { width: 40, height: 30, rgba }).unwrap()).unwrap();
+        // A mask that covers only the page's left column of tiles.
+        let mut bits = vec![false; 6];
+        bits[0] = true;
+        bits[3] = true;
+        let mask = NoiseMask { tile: 16, cols: 3, rows: 2, bits };
+        std::fs::write(capture.join("noise-40.png"), mask.to_png().unwrap()).unwrap();
+        let embed = json!({"tag": "iframe", "id": "game-iframe", "boxes": [{"width": 40, "x": 20, "y": 0, "w": 20, "h": 30}]});
+        assert_eq!(crop_focus_into(&capture, &out, &embed).unwrap(), 1);
+        let shot = decode_png(&std::fs::read(out.join("screenshot-40.png")).unwrap()).unwrap();
+        assert_eq!((shot.width, shot.height), (20, 30));
+        assert!(shot.rgba.as_chunks::<4>().0.iter().all(|p| p == &[0, 0, 255, 255]), "the view, not the page beside it");
+        let cut = NoiseMask::from_png(&std::fs::read(out.join("noise-40.png")).unwrap()).unwrap();
+        assert_eq!(cut.count(), 0, "the moving part was beside the view");
+        // A width with no screenshot beside it is skipped.
+        let embed = json!({"tag": "canvas", "boxes": [{"width": 390, "x": 0, "y": 0, "w": 20, "h": 30}]});
+        assert_eq!(crop_focus_into(&capture, &out, &embed).unwrap(), 0);
     }
 }

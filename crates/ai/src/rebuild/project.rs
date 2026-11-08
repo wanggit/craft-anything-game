@@ -3,7 +3,7 @@
 
 use super::*;
 use craft_anything_engine::Settings;
-use craft_anything_engine::workspace::{ExistingFiles, suggest_name};
+use craft_anything_engine::workspace::{ExistingFiles, Focus, suggest_name};
 
 /// Where a new project goes.
 #[derive(Debug, Clone, Copy, Default)]
@@ -32,6 +32,45 @@ pub(super) fn first_stack(kinds: &KindRegistry, ws: &Workspace, deep: bool) -> O
     let own = m.app_in_root && kinds.named(&m.request, &m.target).is_none();
     let found = own.then(|| stacks::found_in(&ws.app_dir())).flatten();
     found.map(|s| s.name.as_str()).or_else(|| kinds.choose(&m.request, &m.target, deep).map(|(_, stack)| stack))
+}
+
+/// The part of the target the request says to rebuild ("only the game area, the rest doesn't
+/// matter"), as a typed [`Focus`] for the manifest. This is the one place these words are read:
+/// the study and the checks follow the typed field. Version 1 recognises an embedded game area
+/// only; a request that scopes to anything else stays the whole target (said as no focus).
+pub fn read_focus(request: &str) -> Option<Focus> {
+    let r = request.to_lowercase();
+    let game = ["游戏", "遊戲", "game"].iter().any(|w| r.contains(w));
+    let scoped = [
+        "只关注",
+        "只關注",
+        "只看",
+        "只重視",
+        "其他区域不需要",
+        "其他區域不需要",
+        "其他部分不需要",
+        "其他区域不用",
+        "其他部分不用",
+        "忽略其他",
+        "忽略其餘",
+        "其余部分不",
+        "其餘部分不",
+        "其他不用",
+        "不管其他",
+        "only the game",
+        "just the game",
+        "only focus on",
+        "ignore the rest",
+        "ignore the page around",
+        "don't care about the rest",
+        "don't rebuild the rest",
+        "don't rebuild the page around",
+        "everything else out of scope",
+        "not the page around",
+    ]
+    .iter()
+    .any(|p| r.contains(p));
+    (game && scoped).then(|| Focus { what: "the game area".into(), element_id: None })
 }
 
 /// A new project for `request` about `target` (a web address, an absolute path, or `-` for none),
@@ -69,4 +108,35 @@ pub fn new_project(
         m.builder = builder.map(str::to_string);
     })?;
     Ok(ws)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// R2.11: the one place the person's scoping words are read. A game with the rest of the page
+    /// out of scope becomes a typed focus; a game on its own ("复刻一个游戏") is the whole target,
+    /// as is anything that scopes to something that isn't an embedded game.
+    #[test]
+    fn the_request_says_whether_just_the_game_is_wanted() {
+        for request in [
+            "你参考 https://x/game 复刻一个游戏，只关注游戏区域，其他区域不需要关注。",
+            "Rebuild the game at https://x; only the game area, ignore the rest of the page",
+            "clone this game, just the game, not the page around it",
+        ] {
+            let f = read_focus(request).unwrap_or_else(|| panic!("{request} sets a focus"));
+            assert_eq!(f.what, "the game area");
+            assert_eq!(f.element_id, None);
+        }
+        for request in [
+            "复刻一个游戏",
+            "Rebuild this game 1:1",
+            "只关注表单区域，其他不需要",
+            "make me a game like that one",
+            "复刻这个网站",
+            "only the pricing section, ignore the rest",
+        ] {
+            assert!(read_focus(request).is_none(), "{request:?} is the whole target");
+        }
+    }
 }

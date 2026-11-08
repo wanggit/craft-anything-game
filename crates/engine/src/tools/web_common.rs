@@ -1170,6 +1170,20 @@ impl NoiseMask {
         self.bits.iter().filter(|b| **b).count()
     }
 
+    /// The mask of the region (`x`, `y`, `w`, `h` in page pixels): what moves by itself within a
+    /// crop of that region (R2.11). Tiles past the page read as still.
+    pub fn region(&self, x: u32, y: u32, w: u32, h: u32) -> NoiseMask {
+        let tile = self.tile.max(1);
+        let (tx0, ty0) = (x / tile, y / tile);
+        let (tx1, ty1) = (x.saturating_add(w).div_ceil(tile), y.saturating_add(h).div_ceil(tile));
+        let (cols, rows) = ((tx1 - tx0).min(self.cols), (ty1 - ty0).min(self.rows));
+        let bits = (0..rows)
+            .flat_map(|ty| (0..cols).map(move |tx| (tx, ty)))
+            .map(|(tx, ty)| self.bits.get(((ty + ty0) as usize) * (self.cols as usize) + (tx + tx0) as usize).copied().unwrap_or(false))
+            .collect();
+        NoiseMask { tile, cols, rows, bits }
+    }
+
     /// As a PNG with one pixel per tile, white where the page changes by itself.
     pub fn to_png(&self) -> Result<Vec<u8>, ToolError> {
         let rgba = self.bits.iter().flat_map(|b| if *b { [255, 255, 255, 255] } else { [0, 0, 0, 255] }).collect();
@@ -1691,6 +1705,18 @@ mod tests {
         assert!(block_similarity_masked(&first, &wrong, 16, 24, Some(&mask)) < 1.0);
         let everything = NoiseMask { tile: NOISE_TILE, cols: 8, rows: 4, bits: vec![true; 32] };
         assert_eq!(block_similarity_masked(&first, &wrong, 16, 24, Some(&everything)), 1.0, "nothing left to differ");
+    }
+
+    /// R2.11: the mask of a region keeps what moves inside it (a crop's own noise mask).
+    #[test]
+    fn a_regions_mask_keeps_only_the_region() {
+        let mask = NoiseMask { tile: NOISE_TILE, cols: 8, rows: 4, bits: (0..32).map(|i| i % 4 == 0).collect() };
+        let region = mask.region(64, 32, 64, 32);
+        assert_eq!((region.cols, region.rows), (4, 2));
+        assert!(region.covers(0, 0) && region.covers(0, 16), "the moving tiles inside it (page column 4)");
+        assert!(!region.covers(16, 0) && !region.covers(48, 16), "the still tiles inside it");
+        let none = mask.region(1000, 1000, 16, 16);
+        assert_eq!(none.count(), 0, "past the page: nothing moves");
     }
 
     #[test]

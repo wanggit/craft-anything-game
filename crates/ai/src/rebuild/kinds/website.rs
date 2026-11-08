@@ -2,7 +2,7 @@
 //! screenshots with the original's.
 
 use super::*;
-use craft_anything_engine::workspace::{Claim, PageLikeness};
+use craft_anything_engine::workspace::{Claim, Focus, PageLikeness};
 use serde::{Deserialize, Serialize};
 
 pub struct WebsiteKind;
@@ -24,6 +24,45 @@ pub const STATES_DIR: &str = "states";
 /// The folder for the states opened at a phone `width`: `states-390`.
 pub fn phone_states_dir(width: u32) -> String {
     format!("{STATES_DIR}-{width}")
+}
+
+/// Where the focused part's own capture lives (R2.11): capture/focus/, the view the person asked
+/// for as its own page (or cut out of the page's screenshots).
+pub const FOCUS_DIR: &str = "focus";
+
+/// The embedded view the focus points at in a capture's `embeds` (R2.11): the one with the
+/// focus's element id, else the biggest the capture found.
+pub fn pick_focus_embed<'a>(capture: &'a Value, focus: &Focus) -> Option<&'a Value> {
+    let embeds = capture.get("embeds").and_then(Value::as_array)?;
+    if let Some(id) = &focus.element_id
+        && let Some(by_id) = embeds.iter().find(|e| e.get("id").and_then(Value::as_str) == Some(id.as_str()))
+    {
+        return Some(by_id);
+    }
+    let area = |e: &Value| {
+        e.get("boxes").and_then(Value::as_array).into_iter().flatten().fold(0u64, |a, b| {
+            let w = b.get("w").and_then(Value::as_u64).unwrap_or(0);
+            let h = b.get("h").and_then(Value::as_u64).unwrap_or(0);
+            a.max(w.saturating_mul(h))
+        })
+    };
+    let mut best: Option<(u64, &Value)> = None;
+    for e in embeds.iter() {
+        let a = area(e);
+        if a > 0 && best.is_none_or(|(b, _)| a > b) {
+            best = Some((a, e));
+        }
+    }
+    best.map(|(_, e)| e)
+}
+
+/// What the builder is told when the person asked for one part of the page only (R2.11): the
+/// part's own capture is the look to match, and the page around it is out of scope.
+fn focus_brief(focus: &Focus) -> String {
+    format!(
+        "The rebuild is the {} alone — the person asked for just that part, and the page around it is out of scope: don't rebuild it and don't compare yourself to it. The {}'s own capture is in capture/{}/ (screenshot-<width>.png at each width and its own capture.json; open every picture with the Read tool before you plan). Match those pictures closely: the same layout and proportions, sizes, colours, fonts, and where every control sits. The rebuild is the {} itself, filling the window. The checks compare it with capture/{}/ only.",
+        focus.what, focus.what, FOCUS_DIR, focus.what, FOCUS_DIR
+    )
 }
 
 /// The phone width among the widths compared (the narrowest under 768 px), if any.
@@ -169,6 +208,11 @@ impl TargetKind for WebsiteKind {
     }
 
     fn brief_sections(&self, cx: &BriefCx) -> Vec<String> {
+        // A focused rebuild (R2.11) is only about its part: the page's other pages and menus are
+        // out of scope and never studied, so only the focus section is said.
+        if let Some(focus) = &cx.ws.manifest.focus {
+            return vec![focus_brief(focus)];
+        }
         let mut out = Vec::new();
         let routes = routes(cx.ws);
         if !routes.is_empty() {
@@ -185,6 +229,12 @@ impl TargetKind for WebsiteKind {
             ));
         }
         out
+    }
+
+    /// A builder that carries on its session sees only this: where the focused part's capture is
+    /// (R2.11), in case it was brought by a re-study since the brief.
+    fn follow_up_sections(&self, cx: &BriefCx) -> Vec<String> {
+        cx.ws.manifest.focus.as_ref().map(focus_brief).into_iter().collect()
     }
 
     fn checks(&self, ws: &Workspace) -> Vec<Box<dyn Check>> {
@@ -873,5 +923,23 @@ mod tests {
         assert_eq!(site_dir(d.path()), Some(d.path().to_path_buf()), "a plain page");
         std::fs::write(d.path().join("package.json"), "{}").unwrap();
         assert_eq!(site_dir(d.path()), None, "a page beside a manifest is not a built site");
+    }
+
+    /// R2.11: the focus finds its embedded view by element id, else the biggest one the capture
+    /// found; a capture with no embeds leaves nothing to pick.
+    #[test]
+    fn the_focus_finds_its_embedded_view() {
+        let capture = json!({"embeds": [
+            {"tag": "canvas", "boxes": [{"width": 1440, "x": 0, "y": 0, "w": 100, "h": 100}]},
+            {"tag": "iframe", "id": "game-iframe", "src": "https://g.test/play", "boxes": [{"width": 1440, "x": 0, "y": 0, "w": 800, "h": 450}]},
+            {"tag": "canvas", "boxes": [{"width": 1440, "x": 0, "y": 0, "w": 200, "h": 100}]}
+        ]});
+        let biggest = Focus { what: "the game area".into(), element_id: None };
+        assert_eq!(pick_focus_embed(&capture, &biggest).unwrap()["id"], "game-iframe", "the biggest view");
+        let by_id = Focus { what: "the game area".into(), element_id: Some("game-iframe".into()) };
+        assert_eq!(pick_focus_embed(&capture, &by_id).unwrap()["id"], "game-iframe");
+        let missing = Focus { what: "the game area".into(), element_id: Some("nope".into()) };
+        assert_eq!(pick_focus_embed(&capture, &missing).unwrap()["tag"], "iframe", "no such id: the biggest again");
+        assert!(pick_focus_embed(&json!({}), &biggest).is_none(), "no embeds: nothing to pick");
     }
 }

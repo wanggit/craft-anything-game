@@ -60,6 +60,17 @@
       "format": "uint64",
       "minimum": 0
     },
+    "focus": {
+      "description": "The part of the target this rebuild is about, when the person asked for one part only;\nnone: the whole target ([`Focus`]).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Focus"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "generate_assets": {
       "description": "The person lets the builder generate pictures and 3D models (paid, so off until they turn\nit on; it also needs a key for an asset provider).",
       "type": "boolean",
@@ -238,6 +249,26 @@
       "required": [
         "title",
         "passed"
+      ]
+    },
+    "Focus": {
+      "description": "The part of the target this project rebuilds when the person asks for one (\"only the game\narea, the rest doesn't matter\"): a view embedded in the page (a game in an iframe), rebuilt on\nits own. None: the whole target, as ever. Read from the person's request once at run start\n(`rebuild::project::read_focus`); the study and the checks follow this field, not the words.",
+      "type": "object",
+      "properties": {
+        "element_id": {
+          "description": "Find it by this element id on the page (\"game-iframe\"); none: the biggest embedded view\n(iframe, canvas, embed, object) the capture found.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "what": {
+          "description": "What the person called it (\"the game area\"), for messages.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "what"
       ]
     },
     "PageLikeness": {

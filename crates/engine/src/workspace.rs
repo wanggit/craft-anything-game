@@ -354,6 +354,20 @@ impl From<CheckRecord> for CheckResult {
     }
 }
 
+/// The part of the target this project rebuilds when the person asks for one ("only the game
+/// area, the rest doesn't matter"): a view embedded in the page (a game in an iframe), rebuilt on
+/// its own. None: the whole target, as ever. Read from the person's request once at run start
+/// (`rebuild::project::read_focus`); the study and the checks follow this field, not the words.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct Focus {
+    /// What the person called it ("the game area"), for messages.
+    pub what: String,
+    /// Find it by this element id on the page ("game-iframe"); none: the biggest embedded view
+    /// (iframe, canvas, embed, object) the capture found.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub element_id: Option<String>,
+}
+
 /// A workspace's manifest (`craft.json`): what the person asked for, the target, status and history.
 /// Its schema is published in `docs/schemas/craft.schema.json` (`cargo xtask schemas`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -368,6 +382,10 @@ pub struct Manifest {
     /// The stack chosen for the build ("React + TypeScript (Vite)", "Rust + Bevy"…).
     #[serde(default)]
     pub stack: String,
+    /// The part of the target this rebuild is about, when the person asked for one part only;
+    /// none: the whole target ([`Focus`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focus: Option<Focus>,
     #[serde(default)]
     pub status: Status,
     /// One line on what's happening or what went wrong.
@@ -442,6 +460,7 @@ impl Manifest {
             request: request.trim().to_string(),
             target,
             stack: String::new(),
+            focus: None,
             status: Status::New,
             note: String::new(),
             created_ms: now,
@@ -1470,6 +1489,23 @@ mod tests {
         let saved: Value = serde_json::from_slice(&std::fs::read(dir.path().join(MANIFEST)).unwrap()).unwrap();
         assert_eq!(saved["version"], MANIFEST_VERSION);
         assert_eq!(Workspace::open(dir.path()).unwrap().manifest, ws.manifest);
+    }
+
+    /// R2.11: a focus is optional data — it round-trips when set, and a manifest without one
+    /// (including every older file) reads as the whole target and saves without the field.
+    #[test]
+    fn a_manifest_keeps_its_focus_and_reads_without_one() {
+        let mut m = Manifest::new("Game", "clone it", TargetRef::Website { url: "https://x/".into() });
+        m.focus = Some(Focus { what: "the game area".into(), element_id: Some("game-iframe".into()) });
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(json.contains("\"focus\""), "{json}");
+        let back = read_manifest(json.as_bytes()).unwrap();
+        assert_eq!(back.focus, m.focus);
+        let mut doc: Value = serde_json::from_str(&json).unwrap();
+        doc.as_object_mut().unwrap().remove("focus");
+        assert_eq!(read_manifest(&serde_json::to_vec(&doc).unwrap()).unwrap().focus, None, "an older file is the whole target");
+        let plain = serde_json::to_string(&Manifest::new("X", "y", TargetRef::None)).unwrap();
+        assert!(!plain.contains("focus"), "absent stays out of the file: {plain}");
     }
 
     #[test]
