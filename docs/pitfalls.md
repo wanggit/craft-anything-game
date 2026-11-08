@@ -137,6 +137,12 @@ reads every positional argument as a test-name filter and several filters must a
 tests ran and the caller saw "the helper stopped". Pass a stand-in its inputs through the
 environment, and give the command no arguments the harness would read.
 
+**A struct field added, and the crates that build it as a literal not compiled.** Adding `focus`
+to `Manifest` broke `ui-egui`'s demo, which constructs one as a literal; the change was tested in
+engine and ai (the crates edited) and `main` went red for the desktop app. A new field on a type
+other crates construct literally needs `cargo check --workspace --all-targets` before it lands;
+and a literal is a reason to prefer one constructor (`Manifest::new`) everywhere.
+
 ## Building and running
 
 **A model catalogue queried in the wrong project.** OpenCode V2's raw `api get /api/model` does
