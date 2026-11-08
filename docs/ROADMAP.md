@@ -667,6 +667,9 @@ Owner: maintainers · Status: in progress
 ### R2.9 Everyday use: typing, projects, settings
 Owner: maintainers · Status: in progress
 Gaps found while using the app for real projects.
+- [ ] A builder's second `rebuild_check` in a row can fail with "checks/round-0 already exists"
+      (seen in a live run): the self-check round folder's removal and re-creation between two asks
+      in one turn needs looking at, and the second check should say what the first is still writing
 - [x] Agent paragraphs with glossary terms and long file links wrap together without pushing
       their card or later messages under the sidebar (#523); Project and Ask bounds checked at two sizes
       — claimed: carl-dourado, branch hotfix/r2.9-523-message-width
