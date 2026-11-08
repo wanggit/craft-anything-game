@@ -268,7 +268,40 @@ impl Worker {
                 )
             });
             match got {
-                Ok(_) => return Ok(()),
+                Ok(_) => {
+                    // The game's own files (R2.12): the browser already loaded every byte of code
+                    // and art a rebuild needs, and the rebuild may use them as they are. Deep mode
+                    // only — the tool refuses in Clean room, and the brief only mentions what exists.
+                    if !self.engine.session().clean_room() {
+                        let saved = self.call(
+                            craft_anything_engine::tools::website_tools::RESOURCES_SAVE_TOOL,
+                            json!({"output_directory": out.join(kinds::website::RESOURCES_DIR).display().to_string()}),
+                        );
+                        match saved {
+                            Ok(_) => self.step(
+                                ws,
+                                Step::Study,
+                                Status::Inspecting,
+                                &format!(
+                                    "Saved the {}'s own files (code, data, pictures, sounds) into {}/{}/.",
+                                    focus.what,
+                                    kinds::website::FOCUS_DIR,
+                                    kinds::website::RESOURCES_DIR
+                                ),
+                            )?,
+                            Err(e) => self.step(
+                                ws,
+                                Step::Study,
+                                Status::Inspecting,
+                                &format!(
+                                    "The {}'s own files couldn't be saved ({}); it is rebuilt from the screenshots and measurements.",
+                                    focus.what, e.message
+                                ),
+                            )?,
+                        }
+                    }
+                    return Ok(());
+                }
                 Err(e) => self.step(
                     ws,
                     Step::Study,

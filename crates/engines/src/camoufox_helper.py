@@ -18,6 +18,11 @@ Ops:
   {"id": N, "op": "viewport", "width": W, "height": H} -> {}
   {"id": N, "op": "key", "key": "Escape"}         -> {}
   {"id": N, "op": "sleep", "ms": MS}              -> {}
+  {"id": N, "op": "bodies", "max_items": N, "max_body": N}
+      -> {"items": [{"url", "type", "status", "frame", "length", "file", "bytes", "sha256", "how"}],
+          "skipped": [{"url", "type", "reason", "bytes"?}], "total": N}
+      (every response body the pages loaded, one `body-<n>.bin` per body in the work folder;
+       the caller decides what to keep)
   {"id": N, "op": "close"}                        -> {}
 
 The events of a `goto` are the browser's own, shaped like the DevTools events the rest
@@ -39,6 +44,10 @@ MAX_EVENTS = 20_000
 MAX_SCREENSHOT_BYTES = 64 << 20
 # How long a page load may take before it is reported as not loaded, in ms.
 GOTO_TIMEOUT_MS = 45_000
+# Most responses remembered for their bodies (a busy page loads thousands).
+MAX_TRACKED_RESPONSES = 5_000
+# How long one body may take to come back on the fallback re-fetch, in ms.
+BODY_REFETCH_TIMEOUT_MS = 20_000
 
 # Playwright's resource types mapped to the DevTools names the readers expect.
 RESOURCE_TYPES = {
@@ -69,6 +78,9 @@ class Helper:
         self.events = []
         self.request_ids = {}
         self.next_request_id = 0
+        # Every distinct response seen since `open`, kept for `bodies` (R2.12).
+        self.responses = []
+        self.seen_urls = set()
 
     # ---- replies ---------------------------------------------------------------------------
 
@@ -117,14 +129,33 @@ class Helper:
         def on_response(resp):
             rid = self.request_ids.get(id(resp.request), "")
             req = resp.request
+            rtype = RESOURCE_TYPES.get(req.resource_type, "Other")
             self.push_event(
                 "Network.responseReceived",
                 {
                     "requestId": rid,
-                    "type": RESOURCE_TYPES.get(req.resource_type, "Other"),
+                    "type": rtype,
                     "response": {"url": resp.url, "status": resp.status},
                 },
             )
+            # Keep the response for `bodies`: one per distinct URL, first one wins.
+            if len(self.responses) < MAX_TRACKED_RESPONSES and resp.url not in self.seen_urls:
+                self.seen_urls.add(resp.url)
+                try:
+                    frame_url = resp.frame.url if resp.frame is not None else ""
+                except Exception:
+                    frame_url = ""
+                length = None
+                try:
+                    raw_len = (resp.headers or {}).get("content-length")
+                    if raw_len is not None:
+                        length = int(raw_len)
+                except Exception:
+                    length = None
+                self.responses.append(
+                    {"url": resp.url, "type": rtype, "status": resp.status,
+                     "frame": str(frame_url or "")[:2000], "length": length, "resp": resp}
+                )
 
         def on_failed(req):
             rid = self.request_ids.get(id(req), "")
@@ -243,6 +274,60 @@ class Helper:
         if ms:
             self.page.wait_for_timeout(ms)
         return {}
+
+    def op_bodies(self, req):
+        """Every response body the pages loaded, one file per body in the work folder.
+
+        The bytes go to `body-<n>.bin`; the caller decides what to keep and where it lives.
+        A body Playwright won't give back is re-fetched through the browser's own cookie jar
+        (no page code runs); one that still can't be had is listed under `skipped`, never guessed.
+        """
+        import hashlib
+
+        max_items = max(1, min(int(req.get("max_items") or MAX_TRACKED_RESPONSES), MAX_TRACKED_RESPONSES))
+        max_body = max(1, int(req.get("max_body") or (1 << 30)))
+        items = []
+        skipped = []
+        n = 0
+        for meta in self.responses[:max_items]:
+            url, rtype = meta["url"], meta["type"]
+            if url.startswith("data:") or url.startswith("blob:"):
+                skipped.append({"url": url, "type": rtype, "reason": "inline"})
+                continue
+            raw = None
+            how = ""
+            resp = meta.get("resp")
+            if resp is not None:
+                try:
+                    raw = resp.body()
+                    how = "body"
+                except Exception:
+                    raw = None
+                meta["resp"] = None
+            if raw is None and self.context is not None:
+                try:
+                    r = self.context.request.get(url, timeout=BODY_REFETCH_TIMEOUT_MS)
+                    if r.ok:
+                        raw = r.body()
+                        how = "refetch"
+                except Exception:
+                    raw = None
+            if raw is None:
+                skipped.append({"url": url, "type": rtype, "reason": "no body"})
+                continue
+            if len(raw) > max_body:
+                skipped.append({"url": url, "type": rtype, "reason": "too large", "bytes": len(raw)})
+                continue
+            sha = hashlib.sha256(raw).hexdigest()
+            n += 1
+            name = "body-%d.bin" % n
+            self.store_bytes(name, raw)
+            items.append(
+                {"url": url, "type": rtype, "status": meta["status"], "frame": meta["frame"],
+                 "length": meta["length"], "file": name, "bytes": len(raw), "sha256": sha, "how": how}
+            )
+            del raw
+        return {"items": items, "skipped": skipped, "total": len(self.responses)}
 
     def op_close(self, req):
         self.close()

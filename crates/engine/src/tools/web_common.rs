@@ -349,6 +349,15 @@ pub trait PageConn {
     fn press_escape(&mut self, dl: &Deadline);
     /// Let late content settle.
     fn settle(&mut self, ms: u64, dl: &Deadline) -> Result<(), ToolError>;
+    /// The bytes of every response the pages loaded (R2.12): one item per distinct URL with its
+    /// type, status, frame, size, sha256 and how the body was got, and the work file holding the
+    /// bytes (`file`, an absolute path that lives until `finish`), plus `skipped` for what
+    /// couldn't be had. A backend that doesn't keep bodies says so instead of guessing.
+    fn collect_bodies(&mut self, max_body: u64, dl: &Deadline) -> Result<Value, ToolError> {
+        let _ = (max_body, dl);
+        Err(ToolError::new(ErrorCode::FeatureMissing, "this browser doesn't keep the bytes of what the page loaded (Camoufox's does).")
+            .with_remediation("Set the website browser to Camoufox in Settings, open the site again with web_site_open, and retry."))
+    }
     /// Leave the page tidy (disable what we enabled); bounded even past the deadline.
     fn finish(&mut self, dl: &Deadline);
 }
@@ -567,6 +576,11 @@ impl PageConn for CamoufoxConn {
 
     fn settle(&mut self, ms: u64, dl: &Deadline) -> Result<(), ToolError> {
         self.with_helper("camoufox-settle", |h| h.sleep(ms, dl))
+    }
+
+    fn collect_bodies(&mut self, max_body: u64, dl: &Deadline) -> Result<Value, ToolError> {
+        // As many as the helper tracks (its own cap); nothing worth keeping is over the budget.
+        self.with_helper("camoufox-bodies", |h| h.bodies(5_000, max_body, dl))
     }
 
     fn finish(&mut self, _dl: &Deadline) {

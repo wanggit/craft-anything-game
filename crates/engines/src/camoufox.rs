@@ -264,6 +264,28 @@ impl Helper {
         self.request("sleep", json!({"ms": ms}), dl).map(|_| ())
     }
 
+    /// Every response body the pages loaded (R2.12), written by the helper as `body-<n>.bin`
+    /// files in the work folder. The reply's `file` fields become absolute paths here; each item
+    /// carries the URL, type, status, frame, size, sha256 and how the body was got (`body` from
+    /// the browser's own buffer, `refetch` through its cookie jar), and `skipped` lists what
+    /// couldn't be had. The files live until this helper closes.
+    pub fn bodies(&mut self, max_items: u64, max_body: u64, dl: &Deadline) -> Result<Value, ToolError> {
+        let mut r = self.request("bodies", json!({"max_items": max_items, "max_body": max_body}), dl)?;
+        if let Value::Object(m) = &mut r {
+            if let Some(Value::Array(items)) = m.get_mut("items") {
+                for item in items.iter_mut() {
+                    if let Value::Object(it) = item
+                        && let Some(name) = it.get("file").and_then(Value::as_str)
+                    {
+                        it.insert("file".into(), json!(self.work_dir.join(name).display().to_string()));
+                    }
+                }
+            }
+            m.insert("work_dir".into(), json!(self.work_dir.display().to_string()));
+        }
+        Ok(r)
+    }
+
     /// Close the browser. Best effort: the process is killed when this drops anyway.
     pub fn close(&mut self) {
         let dl = Deadline::new(Duration::from_secs(5), craft_anything_platform::cancel::CancelToken::default());
@@ -377,6 +399,38 @@ mod tests {
         assert_eq!(err.code, ErrorCode::TimedOut, "{}", err.message);
     }
 
+    /// R2.12: the bodies round trip — the helper's file names arrive as absolute paths in the
+    /// work folder, and what it couldn't save is listed rather than guessed.
+    #[test]
+    fn bodies_arrive_with_absolute_paths() {
+        let (_keep, work) = work_dir();
+        let cmd = stand_in("normal", &work);
+        let d = dl(30);
+        let mut h = Helper::start(&cmd, &work, &d).unwrap();
+        let r = h.bodies(100, 1 << 20, &d).unwrap();
+        let items = r.get("items").and_then(Value::as_array).unwrap();
+        assert_eq!(items.len(), 2);
+        let f0 = items[0].get("file").and_then(Value::as_str).unwrap();
+        assert!(Path::new(f0).is_absolute(), "{f0}");
+        assert_eq!(std::fs::read(f0).unwrap(), b"first");
+        let second = items[1].get("file").and_then(Value::as_str).unwrap();
+        assert_eq!(std::fs::read(second).unwrap(), b"second");
+        let dir = work.display().to_string();
+        assert_eq!(r.get("work_dir").and_then(Value::as_str), Some(dir.as_str()));
+        assert_eq!(r.get("skipped").and_then(Value::as_array).map(Vec::len), Some(1));
+        assert_eq!(r.get("total"), Some(&json!(3)));
+    }
+
+    /// R2.12: the helper keeps every response body it can and re-fetches through the browser's
+    /// cookie jar the ones its buffer won't give back; what still can't be had is said, not guessed.
+    #[test]
+    fn the_helper_saves_response_bodies() {
+        assert!(HELPER_PY.contains("def op_bodies"), "{HELPER_PY:?}");
+        assert!(HELPER_PY.contains("self.context.request.get"), "a body the buffer won't give is re-fetched through the cookie jar");
+        assert!(HELPER_PY.contains("\"reason\": \"no body\""), "what can't be saved is listed");
+        assert!(HELPER_PY.contains("MAX_TRACKED_RESPONSES"), "the memory it holds is bounded");
+    }
+
     #[test]
     fn a_file_name_with_a_path_is_refused() {
         let (_keep, work) = work_dir();
@@ -440,6 +494,14 @@ mod tests {
                     json!({"id": id, "ok": {"file": "shot-1.png", "width": 800, "height": 600}})
                 }
                 "viewport" | "key" | "sleep" | "close" => json!({"id": id, "ok": {}}),
+                "bodies" => {
+                    std::fs::write(work.join("body-1.bin"), b"first").unwrap();
+                    std::fs::write(work.join("body-2.bin"), b"second").unwrap();
+                    json!({"id": id, "ok": {"items": [
+                        {"url": "https://a.test/game.js", "type": "Script", "status": 200, "frame": "https://a.test/", "length": 5, "file": "body-1.bin", "bytes": 5, "sha256": "aa", "how": "body"},
+                        {"url": "https://cdn.test/sprite.png", "type": "Image", "status": 200, "frame": "https://a.test/", "length": 6, "file": "body-2.bin", "bytes": 6, "sha256": "bb", "how": "refetch"}
+                    ], "skipped": [{"url": "data:text/plain,hi", "type": "Other", "reason": "inline"}], "total": 3}})
+                }
                 other => json!({"id": id, "error": {"message": format!("unknown op {other}")}}),
             };
             let mut line = reply.to_string();
