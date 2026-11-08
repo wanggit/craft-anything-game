@@ -793,17 +793,24 @@ ignore must be data that the study and the check follow.
       title, address and its box at each captured width) as `embeds` in capture.json, addresses
       scrubbed like the rest in Clean room
       — claimed: claude, branch feature/r2.11-capture-embeds; PR #4
-- [ ] The capture browser renders the page's graphics: WebGL works in the browser captures are
-      taken with (software rendering where the computer has no GPU), and a capture whose embedded
-      view didn't render (one colour or an error screen) says so instead of passing it off
-- [ ] A request that says what to ignore ("only the game area", "只关注游戏区域") records a typed
+- [x] The capture browser renders the page's graphics: WebGL works in the browser captures are
+      taken with (software rendering where the computer has no GPU), and a capture says when its
+      browser has no WebGL or when an embedded view shows as one colour ("may not have rendered")
+      instead of passing it off — claimed: claude, branch feature/r2.11-capture-embeds; PR #4
+- [x] A request that says what to ignore ("only the game area", "只关注游戏区域") records a typed
       `focus` in craft.json (versioned, migrated; absent keeps today's whole-target behaviour
       exactly), and the study captures the focused embed's own page (its address opened as a
       site) instead of the site's other pages and chrome states
-- [ ] The check follows the focus: the build is compared only with the focused material (no other
+      — claimed: claude, branch feature/r2.11-capture-embeds; PR #4
+- [x] The check follows the focus: the build is compared only with the focused material (no other
       pages, no chrome states, no out-of-scope text, structure or design), the refine note names
-      only in-scope differences, and a project without a focus checks byte-for-byte as today
-      (pinned by a test)
+      only in-scope differences, and a project without a focus checks as today (its refine note
+      pinned word for word by a test; a noise mask over almost the whole picture is dropped, so an
+      always-moving game can't score 100% against any build)
+      — claimed: claude, branch feature/r2.11-capture-embeds; PR #4
+- [ ] A focused rebuild run live end to end on a real embedded game (study → build → check), and
+      what likeness bar a game with redrawn art can reach: the 90% default may be unreachable for
+      one, and the bar is kept until a real run measures it
 
 ---
 
