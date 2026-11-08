@@ -169,7 +169,19 @@ class Helper:
         headless = bool(req.get("headless", True))
         width = int(req.get("width") or 1280)
         height = int(req.get("height") or 900)
-        self.camoufox = Camoufox(headless=headless, os=os_name, humanize=True, geoip=False)
+        # A capture must see what the page draws, games included: keep WebGL available and let a
+        # software renderer answer when there is no GPU (headless). Camoufox still spoofs the
+        # WebGL identity a page reads; this only keeps the context creatable (R2.11).
+        self.camoufox = Camoufox(
+            headless=headless,
+            os=os_name,
+            humanize=True,
+            geoip=False,
+            firefox_user_prefs={
+                "webgl.force-enabled": True,
+                "webgl.disable-fail-if-major-performance-caveat": True,
+            },
+        )
         self.browser = self.camoufox.__enter__()
         self.context = self.browser.new_context(
             viewport={"width": width, "height": height}, color_scheme="light"

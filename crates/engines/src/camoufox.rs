@@ -292,6 +292,15 @@ mod tests {
         Deadline::new(Duration::from_secs(secs), CancelToken::default())
     }
 
+    /// R2.11: the helper keeps WebGL available (software rendering where there is no GPU): a
+    /// capture must see what a game in an embed draws. Camoufox still spoofs the WebGL identity.
+    #[test]
+    fn the_helper_keeps_webgl_available() {
+        assert!(HELPER_PY.contains("firefox_user_prefs"), "the launch passes Firefox prefs");
+        assert!(HELPER_PY.contains("\"webgl.force-enabled\": True"), "{HELPER_PY:?}");
+        assert!(HELPER_PY.contains("\"webgl.disable-fail-if-major-performance-caveat\": True"), "{HELPER_PY:?}");
+    }
+
     /// The stand-in's command: this test binary re-entered as the ignored stand-in test below.
     /// The behavior and the work folder travel as environment variables (extra argv would be
     /// read as test-name filters by the harness).

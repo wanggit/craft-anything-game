@@ -39,7 +39,7 @@ pub fn specs() -> Vec<ToolSpec> {
         spec(
             "web_site_capture",
             "Capture a website for rebuilding",
-            "Record the open website into a new folder: full-page PNG screenshots at each requested width, the rendered HTML, design tokens (fonts, sizes, weights, text and background colours as hex, radii, shadows, spacing, content widths, CSS custom properties), the widths its CSS switches layout at, the layout at each width (page width, heading and text sizes, each section's padding, gap, content column and items per row), a layout outline of visible landmarks, headings, controls and images with positions, asset lists (images, stylesheets, scripts, font files, the requests it made), links and form outlines (never values). Writes capture.json and a README.md summary.",
+            "Record the open website into a new folder: full-page PNG screenshots at each requested width, the rendered HTML, design tokens (fonts, sizes, weights, text and background colours as hex, radii, shadows, spacing, content widths, CSS custom properties), the widths its CSS switches layout at, the layout at each width (page width, heading and text sizes, each section's padding, gap, content column and items per row), a layout outline of visible landmarks, headings, controls and images with positions, the page's embedded views (iframe, canvas, embed, object: id, title, address and box at each width), asset lists (images, stylesheets, scripts, font files, the requests it made), links and form outlines (never values). Writes capture.json and a README.md summary.",
             "Save pictures and a blueprint of a web page so it can be rebuilt.",
             Toolset::Browser,
             Effects::EVIDENCE.union(Effects::WRITES_FILESYSTEM).union(Effects::ACCESSES_NETWORK),
@@ -690,8 +690,24 @@ const LAYOUT_JS: &str = r#"(() => {
     }
     blocks.push(b);
   }
+  // The page's embedded views (a game in an iframe, a canvas app): what each is and where it
+  // sits. `ord` is the element's order among the same tag whether shown or not, so the same view
+  // is found again at another width even when a width hides one of them.
+  const frames = [];
+  const counts = {};
+  for (const el of document.querySelectorAll('iframe,canvas,embed,object')) {
+    const tag = el.tagName.toLowerCase();
+    const ord = (counts[tag] = (counts[tag] || 0) + 1);
+    if (frames.length >= 32 || !shown(el)) continue;
+    const r = el.getBoundingClientRect();
+    const f = {tag, ord, box: {x: Math.round(r.x + scrollX), y: Math.round(r.y + scrollY), w: Math.round(r.width), h: Math.round(r.height)}};
+    if (el.id) f.id = cap(el.id, 60);
+    const t = el.title || el.getAttribute('aria-label') || ''; if (t) f.title = cap(t, 80);
+    const src = el.src || el.getAttribute('data-src') || el.data || ''; if (src) f.src = String(src);
+    frames.push(f);
+  }
   return {page_w: document.documentElement.scrollWidth, page_h: document.documentElement.scrollHeight,
-    type: {h1: size('h1'), h2: size('h2'), h3: size('h3'), body: size('p')}, blocks};
+    type: {h1: size('h1'), h2: size('h2'), h3: size('h3'), body: size('p')}, blocks, frames};
 })()"#;
 
 fn web_site_capture(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, ToolError> {
@@ -738,6 +754,13 @@ fn web_site_capture(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, Tool
     } else if let (Value::Object(b), Ok(h)) = (&mut blueprint, site.health.lock()) {
         b.insert("health".into(), h.clone());
     }
+    // An embedded view (a game) that shows as one colour in every screenshot may not have
+    // rendered: say so instead of passing its blank box off as what the page shows (R2.11). A
+    // browser without WebGL can't draw a game at all — say that too, since an error screen is
+    // not one colour and would slip past the blank check.
+    let unrendered = unrendered_embeds(&mut blueprint, &out);
+    let no_webgl =
+        blueprint.get("webgl").and_then(Value::as_bool) == Some(false) && blueprint.get("embeds").and_then(Value::as_array).is_some_and(|a| !a.is_empty());
 
     let url = blueprint.get("url").and_then(Value::as_str).unwrap_or_default().to_string();
     let shown = shown_url(&url);
@@ -749,14 +772,21 @@ fn web_site_capture(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, Tool
     write_new_file(&out, &["capture.json".into()], &capture_json).map_err(ToolError::invalid)?;
 
     let summary = format!(
-        "Captured {shown}: {} screenshot(s), {} outline items, {} headings, {images} images, {} links, {} forms → {}.",
+        "Captured {shown}: {} screenshot(s), {} outline items, {} headings, {images} images, {} links, {} forms, {} embedded views → {}.",
         shots.len(),
         n("outline"),
         n("headings"),
         n("links"),
         n("forms"),
+        n("embeds"),
         out.display()
     );
+    let summary = if unrendered.is_empty() {
+        summary
+    } else {
+        format!("{summary} {} embedded view(s) show as one colour in the screenshots, so they may not have rendered (a game may need WebGL).", unrendered.len())
+    };
+    let summary = if no_webgl { format!("{summary} This browser has no WebGL: an embedded game may show an error instead of the game.") } else { summary };
     let ev = EvidenceBuilder::new("web_site_capture", Subject { kind: "website".into(), sha256: None, name: Some(shown.clone()) }, site.env(ctx.session.clean_room()))
         .params(json!({"widths": p.widths, "max_height": p.max_height, "include_html": p.include_html, "noise_pass": p.noise_pass, "visitor_view": visitor}))
         .result(json!({
@@ -765,7 +795,8 @@ fn web_site_capture(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, Tool
             "title": blueprint.get("title"),
             "screenshots": shots,
             "html_bytes": html_bytes,
-            "counts": {"outline": n("outline"), "headings": n("headings"), "links": n("links"), "forms": n("forms"), "images": images},
+            "counts": {"outline": n("outline"), "headings": n("headings"), "links": n("links"), "forms": n("forms"), "images": images, "embeds": n("embeds")},
+            "embeds": blueprint.get("embeds"),
             "design": blueprint.get("design"),
             "files": ["README.md", "capture.json"],
         }))
@@ -773,6 +804,19 @@ fn web_site_capture(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, Tool
         .confidence(Confidence::Observed)
         .authority(Authority::OurRun)
         .limitation(Limitation::new("one_state", "One state of the page: menus, dialogs and content behind interactions are not opened."))
+        .limitations((!unrendered.is_empty()).then(|| {
+            Limitation::new(
+                "embed_not_rendered",
+                format!(
+                    "{} embedded view(s) may not have rendered: their area is one colour in the screenshots ({}). A game may need WebGL; look at the pictures before trusting them.",
+                    unrendered.len(),
+                    unrendered.join(", ")
+                ),
+            )
+        }))
+        .limitations(no_webgl.then(|| {
+            Limitation::new("no_webgl", "This browser has no WebGL, so a game in an embedded view may show an error instead of the game. Look at the screenshots.")
+        }))
         .limitation(if visitor {
             Limitation::new("visitor_view", "Clean room: only what a visitor sees was kept (screenshots, visible text, measured layout and styles); not the page's HTML, CSS rules, scripts, requests or errors.")
         } else {
@@ -803,6 +847,10 @@ fn capture_into(ctx: &Ctx<'_>, page: &mut dyn PageConn, out: &Path, p: &CaptureP
     let mut shots = Vec::new();
     let mut blueprint = Value::Null;
     let mut layouts = Vec::new();
+    let mut embeds: Vec<Value> = Vec::new();
+    // Whether this browser can draw at all: a game in an embed needs WebGL, and a browser without
+    // it photographs an error screen instead (R2.11). Unknown probes count as available.
+    let webgl = page.eval("!!document.createElement('canvas').getContext('webgl')", dl).ok().and_then(|v| v.as_bool()).unwrap_or(true);
     for (i, &w) in p.widths.iter().enumerate() {
         ctx.report(Some(i as f32 / p.widths.len() as f32), format!("Photographing the page at {w} px…"));
         page.set_viewport(w, 900, dl)?;
@@ -815,8 +863,13 @@ fn capture_into(ctx: &Ctx<'_>, page: &mut dyn PageConn, out: &Path, p: &CaptureP
         }
         // A page whose layout can't be read is still photographed.
         if let Ok(Value::Object(mut layout)) = page.eval(LAYOUT_JS, dl) {
+            let frames = match layout.remove("frames") {
+                Some(Value::Array(f)) => f,
+                _ => Vec::new(),
+            };
             layout.insert("width".into(), json!(w));
             layouts.push(Value::Object(layout));
+            merge_frames(&mut embeds, frames, w);
         }
         let height = page
             .eval("Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0)", dl)?
@@ -851,6 +904,10 @@ fn capture_into(ctx: &Ctx<'_>, page: &mut dyn PageConn, out: &Path, p: &CaptureP
     }
     if let Value::Object(b) = &mut blueprint {
         b.insert("layouts".into(), Value::Array(layouts));
+        b.insert("webgl".into(), json!(webgl));
+        if !embeds.is_empty() {
+            b.insert("embeds".into(), Value::Array(embeds));
+        }
     }
     let mut html_bytes = (0, 0);
     if p.include_html {
@@ -861,6 +918,127 @@ fn capture_into(ctx: &Ctx<'_>, page: &mut dyn PageConn, out: &Path, p: &CaptureP
         write_new_file(out, &["page.html".into()], kept.as_bytes()).map_err(ToolError::invalid)?;
     }
     Ok((blueprint, shots, html_bytes))
+}
+
+/// Merge one width's embedded views (`frames` from [`LAYOUT_JS`]) into `embeds` across widths: the
+/// same view at another width is found by id, else by address, else by its order among the views
+/// of the same tag (`ord`, counted whether shown or not). Each embed keeps the box it had at every
+/// width it showed at, so a game in an iframe can be cropped out of any screenshot later.
+fn merge_frames(embeds: &mut Vec<Value>, frames: Vec<Value>, width: u32) {
+    for f in frames.into_iter().take(32) {
+        if !f.is_object() {
+            continue;
+        }
+        let text = |k: &str| f.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
+        let (tag, id, src) = (text("tag"), text("id"), text("src"));
+        let ord = f.get("ord").and_then(Value::as_u64);
+        let num = |k: &str| f.get("box").and_then(|b| b.get(k)).and_then(Value::as_i64).unwrap_or(0);
+        let placed = json!({"width": width, "x": num("x"), "y": num("y"), "w": num("w"), "h": num("h")});
+        // The same view at another width: by id when it has one (two views may share an address),
+        // else by address, else by its order among the views of the same tag (`ord` counts shown
+        // and hidden alike) — only against an embed with neither id nor address of its own.
+        let hit = if !id.is_empty() {
+            embeds.iter().position(|e| e.get("id").and_then(Value::as_str) == Some(id.as_str()))
+        } else if !src.is_empty() {
+            embeds.iter().position(|e| e.get("src").and_then(Value::as_str) == Some(src.as_str()))
+        } else {
+            embeds.iter().position(|e| {
+                e.get("id").and_then(Value::as_str).unwrap_or_default().is_empty()
+                    && e.get("src").and_then(Value::as_str).unwrap_or_default().is_empty()
+                    && e.get("tag").and_then(Value::as_str).unwrap_or_default() == tag
+                    && e.get("ord").and_then(Value::as_u64) == ord
+            })
+        };
+        match hit.and_then(|i| embeds.get_mut(i)) {
+            Some(e) => {
+                if let Some(boxes) = e.get_mut("boxes").and_then(Value::as_array_mut) {
+                    boxes.push(placed);
+                }
+            }
+            None => {
+                let mut e = json!({"tag": tag, "ord": ord.unwrap_or(0), "boxes": [placed]});
+                if !id.is_empty() {
+                    e["id"] = json!(id);
+                }
+                if !src.is_empty() {
+                    e["src"] = json!(src);
+                }
+                if !text("title").is_empty() {
+                    e["title"] = json!(text("title"));
+                }
+                embeds.push(e);
+            }
+        }
+    }
+}
+
+/// The embedded views that show as one colour at every width they showed at: they didn't render
+/// (a game may need WebGL this browser didn't give it). Each is marked `"rendered": false` in the
+/// blueprint, and one line naming it is returned for the capture's note (R2.11).
+fn unrendered_embeds(blueprint: &mut Value, out: &Path) -> Vec<String> {
+    let Some(embeds) = blueprint.get_mut("embeds").and_then(Value::as_array_mut) else { return Vec::new() };
+    let mut lines = Vec::new();
+    for e in embeds.iter_mut() {
+        let tag = e.get("tag").and_then(Value::as_str).unwrap_or("embed");
+        let title = e.get("title").and_then(Value::as_str).unwrap_or_default();
+        let id = e.get("id").and_then(Value::as_str).unwrap_or_default();
+        let name = if !title.is_empty() {
+            format!("{tag} \"{title}\"")
+        } else if !id.is_empty() {
+            format!("{tag} #{id}")
+        } else {
+            tag.to_string()
+        };
+        let boxes = e.get("boxes").and_then(Value::as_array).cloned().unwrap_or_default();
+        let (mut seen, mut blank) = (0u32, 0u32);
+        for b in &boxes {
+            let width = b.get("width").and_then(Value::as_u64).unwrap_or(0);
+            let num = |k: &str| b.get(k).and_then(Value::as_i64).unwrap_or(0);
+            if width == 0 || num("w") < 8 || num("h") < 8 {
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(out.join(format!("screenshot-{width}.png"))) else { continue };
+            let Ok(img) = web_common::decode_png(&bytes) else { continue };
+            // The box is in CSS pixels at that width; the screenshot can be scaled (R2.11).
+            let scale = f64::from(img.width) / width as f64;
+            let at = |k: &str| (num(k) as f64 * scale) as u32;
+            seen += 1;
+            if region_is_blank(&img, at("x"), at("y"), at("w"), at("h")) {
+                blank += 1;
+            }
+        }
+        if seen > 0 && blank == seen {
+            e["rendered"] = json!(false);
+            lines.push(name);
+        }
+    }
+    lines
+}
+
+/// Whether every pixel in the region is about the same brightness (nothing was drawn there).
+fn region_is_blank(img: &web_common::Image, x: u32, y: u32, w: u32, h: u32) -> bool {
+    let (x0, y0) = (x.min(img.width), y.min(img.height));
+    let (x1, y1) = (x.saturating_add(w).min(img.width), y.saturating_add(h).min(img.height));
+    if x1.saturating_sub(x0) < 4 || y1.saturating_sub(y0) < 4 {
+        return false;
+    }
+    let (mut n, mut sum, mut sum2) = (0u64, 0f64, 0f64);
+    for py in y0..y1 {
+        for px in x0..x1 {
+            let o = ((py as usize) * (img.width as usize) + (px as usize)) * 4;
+            if let Some(p) = img.rgba.get(o..o + 3) {
+                let l = 0.299 * f64::from(p[0]) + 0.587 * f64::from(p[1]) + 0.114 * f64::from(p[2]);
+                sum += l;
+                sum2 += l * l;
+                n += 1;
+            }
+        }
+    }
+    if n == 0 {
+        return false;
+    }
+    let mean = sum / n as f64;
+    (sum2 / n as f64 - mean * mean).sqrt() < 2.0
 }
 
 fn truncate_utf8(s: &str, max: usize) -> &str {
@@ -893,6 +1071,11 @@ fn visitor_view(blueprint: &mut Value) {
             item.remove("class");
             item.get_mut("src").map(bare);
             item.get_mut("href").map(bare);
+        }
+    }
+    if let Some(Value::Array(embeds)) = b.get_mut("embeds") {
+        for e in embeds.iter_mut().filter_map(Value::as_object_mut) {
+            e.get_mut("src").map(bare);
         }
     }
     if let Some(Value::Array(links)) = b.get_mut("links") {
@@ -958,10 +1141,10 @@ fn readme(b: &Value, shots: &[Value], (html_bytes, html_total): (usize, usize), 
         md.push_str(&format!("- `page.html` — rendered HTML ({html_bytes} bytes{cut})\n"));
     }
     if visitor {
-        md.push_str("- `capture.json` — design tokens, the layout at each width (`layouts`), layout outline (positions in CSS px), headings, links, forms, picture sizes and visible text\n\n");
+        md.push_str("- `capture.json` — design tokens, the layout at each width (`layouts`), layout outline (positions in CSS px), embedded views (`embeds`), headings, links, forms, picture sizes and visible text\n\n");
         md.push_str("Clean room: only what a visitor sees was kept. The page's HTML, CSS rules, scripts, requests and errors weren't read.\n\n");
     } else {
-        md.push_str("- `capture.json` — design tokens, breakpoints, the layout at each width (`layouts`), layout outline (positions in CSS px), headings, links, forms, assets and visible text\n\n");
+        md.push_str("- `capture.json` — design tokens, breakpoints, the layout at each width (`layouts`), layout outline (positions in CSS px), embedded views (`embeds`), headings, links, forms, assets and visible text\n\n");
     }
     md.push_str("## Design at a glance\n\n");
     md.push_str(&format!("- Fonts: {}\n", top("/design/fonts", 4)));
@@ -979,6 +1162,36 @@ fn readme(b: &Value, shots: &[Value], (html_bytes, html_total): (usize, usize), 
     md.push_str(&layout_section(b, visitor));
     if !visitor {
         md.push_str(&health_section(b));
+    }
+    let embeds: Vec<&Value> = b.pointer("/embeds").and_then(Value::as_array).into_iter().flatten().collect();
+    if !embeds.is_empty() {
+        md.push_str("## Embedded views\n\n");
+        md.push_str("What the page shows inside it (a game, a player, a map); where each sits at every width is in `capture.json` (`embeds`).\n\n");
+        if b.get("webgl").and_then(Value::as_bool) == Some(false) {
+            md.push_str("This browser has no WebGL: a game in an embedded view may show an error instead of the game. Look at the screenshots.\n\n");
+        }
+        for e in embeds.iter().take(12) {
+            let tag = e.get("tag").and_then(Value::as_str).unwrap_or("embed");
+            let title = e.get("title").and_then(Value::as_str).unwrap_or_default();
+            let id = e.get("id").and_then(Value::as_str).unwrap_or_default();
+            let src = e.get("src").and_then(Value::as_str).unwrap_or_default();
+            let mut line = format!("- {tag}");
+            if !title.is_empty() {
+                line.push_str(&format!(" \"{title}\""));
+            }
+            if !id.is_empty() {
+                line.push_str(&format!(" (id {id})"));
+            }
+            if !src.is_empty() {
+                line.push_str(&format!(" — {}", shown_url(src)));
+            }
+            if e.get("rendered").and_then(Value::as_bool) == Some(false) {
+                line.push_str(" — shows as one colour in the screenshots, so it may not have rendered (it may need WebGL)");
+            }
+            md.push_str(&line);
+            md.push('\n');
+        }
+        md.push('\n');
     }
     md.push_str("## Headings\n\n");
     for h in b.pointer("/headings").and_then(Value::as_array).into_iter().flatten().take(40) {
@@ -1252,6 +1465,105 @@ mod tests {
             "{md}"
         );
         assert!(md.contains("### 1440 px"), "{md}");
+    }
+
+    /// R2.11: a view embedded in the page (a game in an iframe) is found again at every width —
+    /// by id, else by address, else by its order among the same tag — and keeps the box it had
+    /// at each, so a later step can crop it out of any screenshot.
+    #[test]
+    fn embedded_views_are_matched_across_widths_by_id_address_then_order() {
+        let frame = |tag: &str, id: &str, src: &str, ord: u32, x: i64| json!({"tag": tag, "id": id, "src": src, "ord": ord, "box": {"x": x, "y": 10, "w": 640, "h": 480}});
+        let mut embeds = Vec::new();
+        merge_frames(&mut embeds, vec![frame("iframe", "game-iframe", "https://g.test/play", 1, 100), frame("canvas", "", "", 1, 0)], 1440);
+        merge_frames(&mut embeds, vec![frame("iframe", "game-iframe", "https://g.test/play", 1, 20), frame("canvas", "", "", 1, 0)], 390);
+        assert_eq!(embeds.len(), 2);
+        let game = &embeds[0];
+        assert_eq!(game["id"], "game-iframe");
+        assert_eq!(game["tag"], "iframe");
+        assert_eq!(game["src"], "https://g.test/play");
+        assert!(game.get("title").is_none(), "no title in the frames");
+        let boxes = game["boxes"].as_array().unwrap();
+        assert_eq!(boxes.len(), 2, "one box per width it showed at");
+        assert_eq!((boxes[0]["width"].as_u64(), boxes[0]["x"].as_i64()), (Some(1440), Some(100)));
+        assert_eq!((boxes[1]["width"].as_u64(), boxes[1]["x"].as_i64()), (Some(390), Some(20)));
+        // An unnamed, address-less canvas is its order among canvases, shown or not.
+        merge_frames(&mut embeds, vec![frame("canvas", "", "", 2, 5), frame("canvas", "", "", 1, 0)], 768);
+        assert_eq!(embeds.len(), 3, "the second canvas is not the first");
+        assert_eq!((embeds[1]["boxes"].as_array().map(Vec::len), embeds[2]["boxes"].as_array().map(Vec::len)), (Some(3), Some(1)));
+        // Same address, no id: the same view.
+        merge_frames(&mut embeds, vec![frame("iframe", "", "https://g.test/play", 2, 8)], 768);
+        assert_eq!(embeds.len(), 3, "matched by address");
+        assert_eq!(embeds[0]["boxes"].as_array().unwrap().len(), 3);
+        // Two views of one address are two views (a game in a desktop and a phone frame).
+        merge_frames(&mut embeds, vec![frame("iframe", "second", "https://g.test/play", 3, 9)], 768);
+        assert_eq!(embeds.len(), 4, "same address, another id: another view");
+        assert_eq!(embeds[3]["id"], "second");
+    }
+
+    /// R2.11: a visitor sees the embedded view and its address, but not the query strings on it.
+    #[test]
+    fn visitor_view_keeps_embeds_but_strips_their_query_strings() {
+        let mut b = json!({
+            "embeds": [
+                {"tag": "iframe", "id": "game-iframe", "title": "Sprunki", "src": "https://g.test/play?token=abc#x",
+                 "boxes": [{"width": 1440, "x": 85, "y": 75, "w": 1000, "h": 520}]},
+                {"tag": "canvas", "boxes": [{"width": 1440, "x": 0, "y": 0, "w": 300, "h": 150}]}
+            ]
+        });
+        visitor_view(&mut b);
+        assert_eq!(b["embeds"][0]["src"], "https://g.test/play");
+        assert_eq!(b["embeds"][0]["title"], "Sprunki");
+        assert_eq!(b["embeds"][0]["boxes"][0]["w"], 1000);
+        assert_eq!(b["embeds"][1]["tag"], "canvas");
+    }
+
+    /// R2.11: the README names what the page embeds (and says nothing when it embeds nothing).
+    #[test]
+    fn readme_names_the_embedded_views() {
+        let b = json!({"url": "https://ex.com/", "embeds": [
+            {"tag": "iframe", "id": "game-iframe", "title": "Sprunki", "src": "https://g.test/play"},
+            {"tag": "canvas", "boxes": []}
+        ]});
+        let md = readme(&b, &[], (0, 0), true);
+        assert!(md.contains("## Embedded views") && md.contains("iframe \"Sprunki\" (id game-iframe) — https://g.test/play"), "{md}");
+        assert!(md.contains("- canvas\n"), "{md}");
+        assert!(!readme(&json!({"url": "https://ex.com/"}), &[], (0, 0), true).contains("Embedded views"), "nothing embedded, no section");
+    }
+
+    /// R2.11: an embedded view that shows as one colour at every width it showed at didn't
+    /// render (a game may need WebGL), and the capture names it instead of passing its blank box
+    /// off as what the page shows. One width with something drawn means it did render.
+    #[test]
+    fn an_embedded_view_that_didnt_render_is_named() {
+        let d = tempfile::tempdir().unwrap();
+        // The screenshots are as wide as the CSS width their boxes were measured at, so the
+        // boxes map straight to pixels.
+        let blank = web_common::encode_png(&web_common::Image { width: 40, height: 30, rgba: vec![0; 40 * 30 * 4] }).unwrap();
+        let mut drawn = Vec::new();
+        for y in 0..20 {
+            for x in 0..30 {
+                drawn.extend_from_slice(&if (x / 5 + y / 5) % 2 == 0 { [200, 40, 40, 255] } else { [20, 20, 120, 255] });
+            }
+        }
+        let drawn = web_common::encode_png(&web_common::Image { width: 30, height: 20, rgba: drawn }).unwrap();
+        std::fs::write(d.path().join("screenshot-40.png"), &blank).unwrap();
+        std::fs::write(d.path().join("screenshot-30.png"), &drawn).unwrap();
+        let box_at = |width: u32| json!({"width": width, "x": 4, "y": 4, "w": 24, "h": 12});
+        let mut b = json!({
+            "webgl": false,
+            "embeds": [
+                {"tag": "iframe", "id": "game-iframe", "title": "Sprunki", "src": "https://g.test/play", "boxes": [box_at(40)]},
+                {"tag": "canvas", "boxes": [box_at(30)]},
+                {"tag": "canvas", "boxes": [box_at(40), box_at(30)]}
+            ]
+        });
+        let lines = unrendered_embeds(&mut b, d.path());
+        assert_eq!(lines, ["iframe \"Sprunki\""], "only the one blank at every width it showed at");
+        assert_eq!(b["embeds"][0]["rendered"], false);
+        assert!(b["embeds"][1].get("rendered").is_none() && b["embeds"][2].get("rendered").is_none(), "drawn at one width: rendered");
+        let md = readme(&b, &[], (0, 0), true);
+        assert!(md.contains("may not have rendered"), "{md}");
+        assert!(md.contains("This browser has no WebGL"), "the README says when WebGL is missing: {md}");
     }
 
     #[test]

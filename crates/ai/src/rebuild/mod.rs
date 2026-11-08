@@ -630,13 +630,26 @@ impl Worker {
             ws.manifest.stack = project::first_stack(&opts.kinds, ws, deep).ok_or_else(no_kind)?.to_string();
             ws.save()?;
         }
+        // What the person asked to ignore ("only the game area") is read once, here, into the
+        // typed field the study and checks follow (R2.11). Absent: the whole target, as ever.
+        let focus = project::read_focus(&ws.manifest.request);
+        if ws.manifest.focus != focus {
+            ws.manifest.focus = focus;
+            ws.save()?;
+        }
         let kind = opts.kinds.detect(&ws.manifest.request, &ws.manifest.target, &ws.manifest.stack).ok_or_else(no_kind)?;
         self.self_check = Some((kind.clone(), opts.good_enough));
         let kind = kind.as_ref();
         self.editor = self.find_editor(&ws.manifest.stack)?;
         let carrying_on = opts.continuing || (opts.message.is_none() && ws.builder_started());
         let first = (opts.message.is_none() && !carrying_on) || !ws.capture_dir().exists();
-        if first {
+        // A focused rebuild whose part's own capture is missing (a project from before focus
+        // existed, or a request that set one since) studies again: the study brings capture/focus/
+        // (R2.11). Only a website has one.
+        let needs_focus = matches!(&ws.manifest.target, TargetRef::Website { .. })
+            && ws.manifest.focus.is_some()
+            && !ws.capture_dir().join(kinds::website::FOCUS_DIR).is_dir();
+        if first || needs_focus {
             self.study(ws, kind)?;
             if let Some((name, ex)) = extractor {
                 self.extract(ws, kind, &name, ex)?;

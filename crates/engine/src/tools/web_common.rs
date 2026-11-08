@@ -104,6 +104,34 @@ fn profile_base(exe: &std::path::Path, home: Option<std::path::PathBuf>) -> std:
     }
 }
 
+/// The arguments that start a private Chromium for capture. Headless turns the GPU off, and a
+/// modern Chromium then refuses software WebGL (a game's "Could not get WebGL context") unless
+/// `--enable-unsafe-swiftshader` says the software renderer is fine (#R2.11): a capture must see
+/// what the page draws, so it is always allowed.
+fn chromium_args(profile: &std::path::Path, opts: &LaunchOptions) -> Vec<String> {
+    let mut args: Vec<String> = vec![
+        format!("--user-data-dir={}", profile.display()),
+        "--remote-debugging-port=0".into(),
+        "--remote-allow-origins=*".into(),
+        "--no-first-run".into(),
+        "--no-default-browser-check".into(),
+        "--disable-background-networking".into(),
+        "--disable-sync".into(),
+        "--disable-extensions".into(),
+        "--disable-features=Translate".into(),
+    ];
+    if opts.headless {
+        args.push("--headless=new".into());
+        args.push("--disable-gpu".into());
+        args.push("--enable-unsafe-swiftshader".into());
+    }
+    if opts.no_sandbox {
+        args.push("--no-sandbox".into());
+    }
+    args.push("about:blank".into());
+    args
+}
+
 impl Browser {
     /// A handle to a browser someone else owns (it is not killed when this drops).
     pub fn attached(endpoint: &Endpoint, product: &str, version: &str) -> Browser {
@@ -152,25 +180,7 @@ impl Browser {
         let exe = craft_anything_engines::locate("chromium", &ctx.session.settings.engines.tools, &ctx.session.settings.engine_store_dir())
             .ok_or_else(|| engine_missing("no Chromium-based browser was found"))?;
         let profile = BrowserProfile(super::artifact_tools::fresh_dir_in(&profile_base(&exe, dirs::home_dir()), "craft-browser")?);
-        let mut args: Vec<String> = vec![
-            format!("--user-data-dir={}", profile.0.display()),
-            "--remote-debugging-port=0".into(),
-            "--remote-allow-origins=*".into(),
-            "--no-first-run".into(),
-            "--no-default-browser-check".into(),
-            "--disable-background-networking".into(),
-            "--disable-sync".into(),
-            "--disable-extensions".into(),
-            "--disable-features=Translate".into(),
-        ];
-        if opts.headless {
-            args.push("--headless=new".into());
-            args.push("--disable-gpu".into());
-        }
-        if opts.no_sandbox {
-            args.push("--no-sandbox".into());
-        }
-        args.push("about:blank".into());
+        let args = chromium_args(&profile.0, opts);
         let cancel = ctx.cancel.clone();
         let tail = StderrTail::default();
         let sink = tail.clone();
@@ -1160,6 +1170,20 @@ impl NoiseMask {
         self.bits.iter().filter(|b| **b).count()
     }
 
+    /// The mask of the region (`x`, `y`, `w`, `h` in page pixels): what moves by itself within a
+    /// crop of that region (R2.11). Tiles past the page read as still.
+    pub fn region(&self, x: u32, y: u32, w: u32, h: u32) -> NoiseMask {
+        let tile = self.tile.max(1);
+        let (tx0, ty0) = (x / tile, y / tile);
+        let (tx1, ty1) = (x.saturating_add(w).div_ceil(tile), y.saturating_add(h).div_ceil(tile));
+        let (cols, rows) = ((tx1 - tx0).min(self.cols), (ty1 - ty0).min(self.rows));
+        let bits = (0..rows)
+            .flat_map(|ty| (0..cols).map(move |tx| (tx, ty)))
+            .map(|(tx, ty)| self.bits.get(((ty + ty0) as usize) * (self.cols as usize) + (tx + tx0) as usize).copied().unwrap_or(false))
+            .collect();
+        NoiseMask { tile, cols, rows, bits }
+    }
+
     /// As a PNG with one pixel per tile, white where the page changes by itself.
     pub fn to_png(&self) -> Result<Vec<u8>, ToolError> {
         let rgba = self.bits.iter().flat_map(|b| if *b { [255, 255, 255, 255] } else { [0, 0, 0, 255] }).collect();
@@ -1683,6 +1707,18 @@ mod tests {
         assert_eq!(block_similarity_masked(&first, &wrong, 16, 24, Some(&everything)), 1.0, "nothing left to differ");
     }
 
+    /// R2.11: the mask of a region keeps what moves inside it (a crop's own noise mask).
+    #[test]
+    fn a_regions_mask_keeps_only_the_region() {
+        let mask = NoiseMask { tile: NOISE_TILE, cols: 8, rows: 4, bits: (0..32).map(|i| i % 4 == 0).collect() };
+        let region = mask.region(64, 32, 64, 32);
+        assert_eq!((region.cols, region.rows), (4, 2));
+        assert!(region.covers(0, 0) && region.covers(0, 16), "the moving tiles inside it (page column 4)");
+        assert!(!region.covers(16, 0) && !region.covers(48, 16), "the still tiles inside it");
+        let none = mask.region(1000, 1000, 16, 16);
+        assert_eq!(none.count(), 0, "past the page: nothing moves");
+    }
+
     #[test]
     fn perceptual_similarity_sees_structure() {
         let img = |w: u32, h: u32, f: &dyn Fn(u32, u32) -> u8| {
@@ -1730,6 +1766,18 @@ mod tests {
         assert_eq!(px(0, 0), vec![0, 255, 0, 255], "left of the cut is page column 2");
         assert_eq!(px(3, 0), vec![0, 0, 255, 255], "right of the cut is page column 5");
         assert_eq!(px(0, 3), vec![255, 255, 255, 255], "rows past the image are white");
+    }
+
+    /// R2.11: a capture browser must be able to draw: headless Chromium turns the GPU off and a
+    /// modern Chromium then refuses software WebGL unless the flag allows it (a game's "Could not
+    /// get WebGL context"). A headed browser draws with the GPU and needs no flag.
+    #[test]
+    fn headless_chromium_allows_the_software_renderer() {
+        let headless = chromium_args(std::path::Path::new("/p"), &LaunchOptions::default());
+        assert!(headless.contains(&"--enable-unsafe-swiftshader".to_string()), "{headless:?}");
+        assert!(headless.contains(&"--disable-gpu".to_string()), "{headless:?}");
+        let headed = chromium_args(std::path::Path::new("/p"), &LaunchOptions { headless: false, ..LaunchOptions::default() });
+        assert!(!headed.contains(&"--enable-unsafe-swiftshader".to_string()), "{headed:?}");
     }
 
     /// A flow through the website tools on the Camoufox backend, with a stand-in helper (no
