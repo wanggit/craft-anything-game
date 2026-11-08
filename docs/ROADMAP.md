@@ -176,7 +176,9 @@ only when it's green and a maintainer has fully reviewed it, code as well as wor
       busy machine can refuse while another test's child still holds the file open
 - [ ] `a_remote_query_expands_only_the_remote_working_directory` (ai crate) fails on a Mac: the
       temp folder is `/var/…`, a link to `/private/var/…`, and the shell's `$PWD` gives the second.
-      Compare with the folder's canonical path
+      Compare with the folder's canonical path. `remote_discovery_uses_the_remote_program_and_connection_context`
+      fails there too (the remote program's configured path comes back as its bare name): check
+      both together on a Mac
 - [ ] Revisit the two advisory exceptions in `deny.toml`: `rsa` (no fix; we only verify with public
       keys) when rsa 0.10 lands, and unmaintained `zbus_names`/`zvariant` (Linux-only via keyring
       and accesskit) when those move on. `deny.toml`'s comments say this is tracked in R0.3: point
