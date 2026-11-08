@@ -754,9 +754,13 @@ fn web_site_capture(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, Tool
     } else if let (Value::Object(b), Ok(h)) = (&mut blueprint, site.health.lock()) {
         b.insert("health".into(), h.clone());
     }
-    // An embedded view (a game) that shows as one colour in every screenshot didn't render: say
-    // so instead of passing its blank box off as what the page shows (R2.11).
+    // An embedded view (a game) that shows as one colour in every screenshot may not have
+    // rendered: say so instead of passing its blank box off as what the page shows (R2.11). A
+    // browser without WebGL can't draw a game at all — say that too, since an error screen is
+    // not one colour and would slip past the blank check.
     let unrendered = unrendered_embeds(&mut blueprint, &out);
+    let no_webgl =
+        blueprint.get("webgl").and_then(Value::as_bool) == Some(false) && blueprint.get("embeds").and_then(Value::as_array).is_some_and(|a| !a.is_empty());
 
     let url = blueprint.get("url").and_then(Value::as_str).unwrap_or_default().to_string();
     let shown = shown_url(&url);
@@ -780,8 +784,9 @@ fn web_site_capture(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, Tool
     let summary = if unrendered.is_empty() {
         summary
     } else {
-        format!("{summary} {} embedded view(s) show as one colour in the screenshots, so they didn't render (a game may need WebGL).", unrendered.len())
+        format!("{summary} {} embedded view(s) show as one colour in the screenshots, so they may not have rendered (a game may need WebGL).", unrendered.len())
     };
+    let summary = if no_webgl { format!("{summary} This browser has no WebGL: an embedded game may show an error instead of the game.") } else { summary };
     let ev = EvidenceBuilder::new("web_site_capture", Subject { kind: "website".into(), sha256: None, name: Some(shown.clone()) }, site.env(ctx.session.clean_room()))
         .params(json!({"widths": p.widths, "max_height": p.max_height, "include_html": p.include_html, "noise_pass": p.noise_pass, "visitor_view": visitor}))
         .result(json!({
@@ -803,11 +808,14 @@ fn web_site_capture(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, Tool
             Limitation::new(
                 "embed_not_rendered",
                 format!(
-                    "{} embedded view(s) didn't render: their area is one colour in the screenshots ({}). A game may need WebGL; look at the pictures before trusting them.",
+                    "{} embedded view(s) may not have rendered: their area is one colour in the screenshots ({}). A game may need WebGL; look at the pictures before trusting them.",
                     unrendered.len(),
                     unrendered.join(", ")
                 ),
             )
+        }))
+        .limitations(no_webgl.then(|| {
+            Limitation::new("no_webgl", "This browser has no WebGL, so a game in an embedded view may show an error instead of the game. Look at the screenshots.")
         }))
         .limitation(if visitor {
             Limitation::new("visitor_view", "Clean room: only what a visitor sees was kept (screenshots, visible text, measured layout and styles); not the page's HTML, CSS rules, scripts, requests or errors.")
@@ -1159,6 +1167,9 @@ fn readme(b: &Value, shots: &[Value], (html_bytes, html_total): (usize, usize), 
     if !embeds.is_empty() {
         md.push_str("## Embedded views\n\n");
         md.push_str("What the page shows inside it (a game, a player, a map); where each sits at every width is in `capture.json` (`embeds`).\n\n");
+        if b.get("webgl").and_then(Value::as_bool) == Some(false) {
+            md.push_str("This browser has no WebGL: a game in an embedded view may show an error instead of the game. Look at the screenshots.\n\n");
+        }
         for e in embeds.iter().take(12) {
             let tag = e.get("tag").and_then(Value::as_str).unwrap_or("embed");
             let title = e.get("title").and_then(Value::as_str).unwrap_or_default();
@@ -1175,7 +1186,7 @@ fn readme(b: &Value, shots: &[Value], (html_bytes, html_total): (usize, usize), 
                 line.push_str(&format!(" — {}", shown_url(src)));
             }
             if e.get("rendered").and_then(Value::as_bool) == Some(false) {
-                line.push_str(" — didn't render in the screenshots (its area is one colour; it may need WebGL)");
+                line.push_str(" — shows as one colour in the screenshots, so it may not have rendered (it may need WebGL)");
             }
             md.push_str(&line);
             md.push('\n');
@@ -1551,7 +1562,8 @@ mod tests {
         assert_eq!(b["embeds"][0]["rendered"], false);
         assert!(b["embeds"][1].get("rendered").is_none() && b["embeds"][2].get("rendered").is_none(), "drawn at one width: rendered");
         let md = readme(&b, &[], (0, 0), true);
-        assert!(md.contains("didn't render in the screenshots"), "{md}");
+        assert!(md.contains("may not have rendered"), "{md}");
+        assert!(md.contains("This browser has no WebGL"), "the README says when WebGL is missing: {md}");
     }
 
     #[test]
