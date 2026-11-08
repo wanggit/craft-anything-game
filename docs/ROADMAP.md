@@ -811,6 +811,10 @@ ignore must be data that the study and the check follow.
 - [ ] A focused rebuild run live end to end on a real embedded game (study → build → check), and
       what likeness bar a game with redrawn art can reach: the 90% default may be unreachable for
       one, and the bar is kept until a real run measures it
+- [ ] The focused capture waits for the game to finish loading before photographing it: a game
+      photographed seconds after the page settles is its loading screen, which the builder then
+      chases (seen on a real embedded game)
+      — claimed: claude, branch feature/r2.11-focus-settle
 
 ---
 
