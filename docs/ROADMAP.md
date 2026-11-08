@@ -843,8 +843,21 @@ embed), only the game body.
       js_sources_restore / js_app_map, data files directly); a project without a focus keeps every
       word of its brief and refine note as they are (pinned by tests)
       — claimed: claude, branch feature/r2.12-game-resources; PR #8
-- [ ] A focused rebuild of a real embedded game runs live end to end with resources (study →
+- [x] A focused rebuild of a real embedded game runs live end to end with resources (study →
       build → check), and what the likeness bar reaches now — paired with R2.11's live line
+      (ran 2026-11-08 on Sprunki at crazygames.com, a TurboWarp/Scratch game: 92% alike,
+      5/5 claims, playable; the game's 598 assets had to be recovered by hand — see below)
+- [ ] After the save, fetch what the saved manifests name and the capture didn't see: the first
+      live run's game defined 598 asset files and the browser had only requested part of them
+      (lazy loading); the builder fetched the rest itself from the game's server. The tool should
+      read known manifest shapes (a Scratch project's asset list first), find what the page never
+      requested, and fetch those through the browser's own cookie jar
+- [ ] The web check photographs a game before its first paint: the 1440 screenshot caught the
+      boot black window (~3.5 s of runtime warm-up and sound decode) in every round of the first
+      live run, dragging an otherwise 91–95% build down to 77%. The check should wait for a
+      settled frame (or a build's declared ready signal) before photographing
+- [ ] `capture_focus`'s step message double-says "the" ("Photographing the the game area") —
+      focus.what already carries its article
 
 ---
 
