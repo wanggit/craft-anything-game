@@ -831,18 +831,18 @@ game capture can keep them. Decided 2026-11-08: the game's own resources may be 
 rebuild as they are; the code is rewritten keeping its meaning (the same formulas, constants,
 timings and states, in the builder's own code); a 1 GiB budget; only for game rebuilds (a focused
 embed), only the game body.
-- [ ] The capture browser keeps the bytes: a new Deep-mode `web_resources_save` writes every
+- [x] The capture browser keeps the bytes: a new Deep-mode `web_resources_save` writes every
       response body the open page loaded (all frames) to files with a `resources.json` manifest
       (url → file, type, size, sha256, frame, how it was got), deduped by URL and content hash
       under a 1 GiB budget (scripts, WASM and data kept before media on overflow; the manifest
       says what was dropped)
-      — claimed: claude, branch feature/r2.12-game-resources
-- [ ] The focused game capture saves the game body's resources (capture/focus/resources/) in the
+      — claimed: claude, branch feature/r2.12-game-resources; PR #8
+- [x] The focused game capture saves the game body's resources (capture/focus/resources/) in the
       study, and the focused brief says: reuse the resources as they are in app/, rewrite the code
       keeping its meaning (never paste the original's text), and how to read what (bundles through
       js_sources_restore / js_app_map, data files directly); a project without a focus keeps every
       word of its brief and refine note as they are (pinned by tests)
-      — claimed: claude, branch feature/r2.12-game-resources
+      — claimed: claude, branch feature/r2.12-game-resources; PR #8
 - [ ] A focused rebuild of a real embedded game runs live end to end with resources (study →
       build → check), and what the likeness bar reaches now — paired with R2.11's live line
 
