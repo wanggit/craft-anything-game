@@ -253,8 +253,15 @@ impl Worker {
         };
         let src = embed.get("src").and_then(Value::as_str).unwrap_or_default().to_string();
         if !src.is_empty() {
-            self.step(ws, Step::Study, Status::Inspecting, &format!("Photographing the {} on its own…", focus.what))?;
-            let got = self.call("web_site_open", json!({"url": src})).and_then(|_| {
+            self.step(ws, Step::Study, Status::Inspecting, &format!("Photographing the {} on its own, waiting for it to load…", focus.what))?;
+            let got = self.call("web_site_open", focus_open_params(&src)).and_then(|_| {
+                // A game goes on loading its assets long after the page settles; photographed too
+                // soon it is its loading screen, which the builder then chases (R2.11).
+                let until = std::time::Instant::now() + Duration::from_secs(FOCUS_LOAD_WAIT_SECS);
+                while std::time::Instant::now() < until {
+                    std::thread::sleep(Duration::from_millis(500));
+                    self.stop.check()?;
+                }
                 self.call(
                     "web_site_capture",
                     json!({"output_directory": out.display().to_string(), "include_html": false, "noise_pass": true, "widths": widths}),
@@ -318,6 +325,17 @@ impl Worker {
 
 /// Deep mode's notes on how a website works, in capture/.
 pub(super) const HOW_IT_WORKS: &str = "how-it-works.md";
+
+/// How much longer than the page's own settle the focused view's page gets before it is
+/// photographed, on top of `settle_ms` in [`focus_open_params`] (R2.11). A game loads its assets
+/// for a while; photographed at two seconds it is its loading screen.
+pub(super) const FOCUS_LOAD_WAIT_SECS: u64 = 25;
+
+/// How the focused view's own page is opened (R2.11): a long settle (the tool's own maximum),
+/// then [`FOCUS_LOAD_WAIT_SECS`] more before it is photographed.
+pub(super) fn focus_open_params(src: &str) -> Value {
+    json!({"url": src, "settle_ms": 20_000})
+}
 
 /// Cut the focused view's boxes out of the page's screenshots into `out`, one per width the view
 /// showed at, with the noise masks cut to match (what moves by itself stays un-compared). The box
@@ -398,5 +416,15 @@ mod tests {
         // A width with no screenshot beside it is skipped.
         let embed = json!({"tag": "canvas", "boxes": [{"width": 390, "x": 0, "y": 0, "w": 20, "h": 30}]});
         assert_eq!(crop_focus_into(&capture, &out, &embed).unwrap(), 0);
+    }
+
+    /// R2.11: the focused view's page gets a long settle and a wait before it is photographed:
+    /// a game at two seconds is its loading screen (seen on a real embedded game).
+    #[test]
+    fn the_focus_page_is_given_time_to_load() {
+        let p = focus_open_params("https://g.test/play");
+        assert_eq!(p["url"], "https://g.test/play");
+        assert_eq!(p["settle_ms"], 20_000);
+        assert_eq!(FOCUS_LOAD_WAIT_SECS, 25);
     }
 }
