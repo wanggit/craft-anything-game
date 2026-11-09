@@ -856,12 +856,12 @@ it written anew), never a from-scratch reimplementation.
       sounds, fonts and data copied into app/ and used as they are, its code what the build is
       written from — adapted keeping its meaning, a compiled runtime run as it is with only the
       loader, bridge and UI around it — and never a from-scratch reimplementation
-      — claimed: claude, branch feature/r2.12-use-originals
+      — claimed: claude, branch feature/r2.12-use-originals; PR #10
 - [x] The web check catches a from-scratch build: a focused rebuild whose resources were saved
       must reuse at least one of them unchanged (the claim reads capture/focus/resources/
       resources.json and hashes the files in app/), so a lookalike that reuses none of the game's
       own files can't pass on a matching boot screen alone
-      — claimed: claude, branch feature/r2.12-use-originals
+      — claimed: claude, branch feature/r2.12-use-originals; PR #10
 - [ ] After the save, fetch what the saved manifests name and the capture didn't see: the first
       live run's game defined 598 asset files and the browser had only requested part of them
       (lazy loading); the builder fetched the rest itself from the game's server. The tool should
