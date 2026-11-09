@@ -832,9 +832,14 @@ rebuild as they are; the code is rewritten keeping its meaning (the same formula
 timings and states, in the builder's own code); a 1 GiB budget; only for game rebuilds (a focused
 embed), only the game body. Decided 2026-11-09 (the person, after a live run rebuilt a Unity game
 from scratch instead and only their reminder put it right): using the game's own files is the
-default, not just permitted — its assets and data as they are, and its code what the build is
-written from (adapted keeping its meaning; a compiled runtime run as it is, only the glue around
-it written anew), never a from-scratch reimplementation.
+default, not just permitted. Decided again later the same day (the person asked what "改写" had
+meant): a compiled runtime is not run as it is. The rebuild is a true rebuild (真复刻) — the
+builder's own web-stack game (casual portal games are the scope; HTML/JS, canvas or Three.js),
+its code written from the original's (readable code adapted keeping its meaning; compiled logic
+recovered — unpacked data, metadata names, a disassembled wasm — into app/MECHANICS.md and
+reimplemented), the original's assets and data as they are; the game's own files run as they are
+only when the request asks for that. The Ready bar waits for a few measured true-rebuild
+attempts (the person).
 - [x] The capture browser keeps the bytes: a new Deep-mode `web_resources_save` writes every
       response body the open page loaded (all frames) to files with a `resources.json` manifest
       (url → file, type, size, sha256, frame, how it was got), deduped by URL and content hash
@@ -862,6 +867,21 @@ it written anew), never a from-scratch reimplementation.
       resources.json and hashes the files in app/), so a lookalike that reuses none of the game's
       own files can't pass on a matching boot screen alone
       — claimed: claude, branch feature/r2.12-use-originals; PR #10
+- [x] The focused game rebuild is a true rebuild (the person, 2026-11-09: 真复刻; casual portal
+      games, web stack): the game is the builder's own web-stack implementation (HTML/JS — canvas,
+      Three.js as fits), written from the original's code — its readable code adapted, its compiled
+      logic recovered (unpacked data, metadata names, a disassembled wasm) into app/MECHANICS.md
+      and reimplemented — with the original's pictures, sounds, fonts and data used as they are.
+      The original's compiled runtime is never the game unless the request asks for it (then the
+      request's way is what happens). The claims enforce both halves: none of the game's own art
+      and data reused → fail; the original's compiled runtime copied into the build → fail, unless
+      the request asked to run the original's files as they are
+      — claimed: claude, branch feature/r2.12-wasm-rebuild
+- [ ] A few real true-rebuild attempts on casual portal games, measured: the likeness reached, how
+      much of the mechanics was recovered (app/MECHANICS.md against the original's numbers), and
+      where the tools stop short (a WebGL build's packed data, IL2CPP metadata in a WebGL export,
+      reading a wasm). The Ready bar is decided from those numbers (the person, 2026-11-09: don't
+      fix it before) — decision
 - [ ] After the save, fetch what the saved manifests name and the capture didn't see: the first
       live run's game defined 598 asset files and the browser had only requested part of them
       (lazy loading); the builder fetched the rest itself from the game's server. The tool should

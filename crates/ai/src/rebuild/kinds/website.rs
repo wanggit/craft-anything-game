@@ -2,6 +2,7 @@
 //! screenshots with the original's.
 
 use super::*;
+use crate::rebuild::project::run_as_is_asked;
 use craft_anything_engine::workspace::{Claim, Focus, PageLikeness};
 use serde::{Deserialize, Serialize};
 
@@ -68,21 +69,34 @@ fn focus_brief(focus: &Focus) -> String {
     )
 }
 
-/// What the builder is told when the focused part's own files were saved (R2.12): for a game they
-/// are the build's material by default — its assets as they are, and its code what the build is
-/// written from (a compiled runtime run as it is), never a from-scratch reimplementation (the
-/// person's own words, after a live run rebuilt a Unity game from scratch and only their reminder
-/// put it right).
+/// What the builder is told when the focused part's own files were saved (R2.12). The default is
+/// a true rebuild (the person, 2026-11-09): the game is the builder's own web-stack
+/// implementation, written from the original's code, with the original's art and data as they
+/// are — never the original's compiled runtime as the game. Only a request that asks for the
+/// original's own files to run as they are ([`run_as_is_asked`]) gets that instead.
 fn focus_resources_brief(focus: &Focus, ws: &Workspace) -> Option<String> {
     if !ws.capture_dir().join(FOCUS_DIR).join(RESOURCES_DIR).join("resources.json").is_file() {
         return None;
     }
+    let what = &focus.what;
+    let files = format!(
+        "The {}'s own files (its code, data, pictures, sounds) were saved into capture/{}/resources/: resources.json maps every address the browser loaded to its bytes under files/.",
+        what, FOCUS_DIR
+    );
+    if run_as_is_asked(&ws.manifest.request) {
+        return Some(format!(
+            "{files} The person's request asks for the game's own files to run as they are, and that is what you do: where anything above says to rebuild the behaviour yourself, use placeholders, or keep the original's code out of app/, the game's own files win.\n\
+             - Pictures, sounds, fonts and data: copy every one the game uses into app/ and use them as they are.\n\
+             - Code: the game's code ships as what runs it (a compiled runtime such as a Unity WebGL build, engine data files, or one project file that drives the game): run those files as they are in app/ and write only the code around them — the loader, the bridge to the page, the UI. Read bundles with js_sources_restore and js_app_map where the code around them needs adapting; data files open as they are.\n\
+             List what the build uses of the original's files in your summary. If something in them can't be used, say why."
+        ));
+    }
     Some(format!(
-        "The {}'s own files (its code, data, pictures, sounds) were saved into capture/{}/resources/: resources.json maps every address the browser loaded to its bytes under files/. The person wants the game rebuilt from its own files, for their own use on this computer, and that is what you do by default: where anything above says to rebuild the behaviour yourself, use placeholders, or keep the original's code out of app/, the game's own files win.\n\
-         - Pictures, sounds, fonts and data: copy every one the game uses into app/ and use them as they are. Never redraw, regenerate or substitute a file that is already here.\n\
-         - Code: the game's own code is what you build from. Read it first (js_sources_restore and js_app_map for bundles; data files open as they are), then adapt it into app/ keeping its meaning — the same formulas, constants, timings and states. Where its code ships as a runnable artifact (a compiled runtime such as a Unity WebGL build, engine data files, or one project file that drives the game), run those files as they are in app/ and write only the code around them: the loader, the bridge to the page, the UI.\n\
-         Never replace the game with a from-scratch implementation while its own files are here. If something in them can't be used, say why in your summary.",
-        focus.what, FOCUS_DIR
+        "{files} The person wants a true rebuild of this game: your own code that plays like it, written from its code, for their own use on this computer. That is what you do by default — where anything above says to rebuild the behaviour yourself, use placeholders, or keep the original's code out of app/, this game's own files and code win.\n\
+         - Build it as a web game in your own code (HTML and JavaScript — canvas, Three.js or whatever fits), unless their request names another stack. No game-engine project.\n\
+         - Pictures, sounds, fonts and data: copy every one the game uses into app/ and use them as they are — never redraw, regenerate or substitute a file that is already here. Its lists and tables (levels, items, prices, timings) go in unchanged.\n\
+         - Code: the game's own code is what you write the game from. Read it first (js_sources_restore and js_app_map for bundles; data files open as they are). Where its logic is readable (scripts, project data), adapt it into app/ keeping its meaning — the same formulas, constants, timings and states. Where it is compiled (a wasm build, engine data), recover what it does before you write a line: formats_wasm_module_show reads a wasm module; game_unity_list and game_unity_asset_export read Unity data and bundles (decompress .unityweb streams first, keeping the decompressor inside the project folder); game_unity_code_names_show names a Unity build's classes, methods and fields from its metadata. Put every constant, formula and rule you recover into app/MECHANICS.md with where it came from (a file, a name or address, or an evidence id) or mark it \"estimated\", then implement the game from that sheet.\n\
+         - Never run the original's compiled runtime (its wasm or engine data) as the game: the game is your own implementation. If something can't be read or recovered, record it with core_unknown_add and say what you did instead in your summary."
     ))
 }
 
@@ -790,35 +804,65 @@ fn check_scope(ws: &Workspace) -> PathBuf {
     }
 }
 
-/// The claim that the build reuses the game's own saved files (R2.12): the ones that can't be
-/// rewritten — pictures, sounds, fonts, data and compiled runtimes, not the scripts and pages the
-/// build adapts — must reach the build unchanged. A rebuild that copies none of them is a
-/// from-scratch lookalike, however alike its pictures look; a saved set of only scripts and pages
-/// has nothing to reuse as files, so no claim is made.
-fn originals_claim(ws: &Workspace) -> Option<Claim> {
-    let manifest = read_json(&ws.capture_dir().join(FOCUS_DIR).join(RESOURCES_DIR).join("resources.json"))?;
-    let mut want: std::collections::BTreeSet<(u64, String)> = std::collections::BTreeSet::new();
+/// The claims about the game's own saved files (R2.12): what the focused brief asked for is what
+/// must show up in the build. The default is a true rebuild — the game's art and data reused
+/// unchanged, and its compiled runtime kept out of app/ (the game is the builder's own
+/// implementation); a request that asks for the game's own files to run as they are gets that
+/// instead. Either way a build that reuses none of the saved files is a from-scratch lookalike,
+/// however alike its pictures look; a saved set of only the files the build rewrites (scripts,
+/// stylesheets, pages) makes no claim at all.
+fn originals_claims(ws: &Workspace, run_as_is: bool) -> Vec<Claim> {
+    let Some(manifest) = read_json(&ws.capture_dir().join(FOCUS_DIR).join(RESOURCES_DIR).join("resources.json")) else {
+        return Vec::new();
+    };
+    // Scripts, stylesheets and pages are rewritten (adapted), not copied. A compiled runtime (a
+    // wasm or engine build) is what a true rebuild reimplements instead of running; the rest —
+    // pictures, sounds, fonts, data — is used as it is.
+    let mut art = std::collections::BTreeSet::new();
+    let mut runtime = std::collections::BTreeSet::new();
     for it in manifest.get("items").and_then(Value::as_array).into_iter().flatten() {
         let kind = it.get("type").and_then(Value::as_str).unwrap_or_default();
         if matches!(kind, "Script" | "Stylesheet" | "Document") {
-            continue; // adapted into the build, not copied
+            continue;
         }
         let (Some(bytes), Some(sha)) = (it.get("bytes").and_then(Value::as_u64), it.get("sha256").and_then(Value::as_str)) else { continue };
-        want.insert((bytes, sha.to_string()));
+        let url = it.get("url").and_then(Value::as_str).unwrap_or_default().split(['?', '#']).next().unwrap_or_default().to_ascii_lowercase();
+        if [".wasm", ".unityweb", ".pck", ".data"].iter().any(|e| url.ends_with(e)) {
+            runtime.insert((bytes, sha.to_string()));
+        } else {
+            art.insert((bytes, sha.to_string()));
+        }
     }
-    if want.is_empty() {
-        return None;
+    let mut want = art.clone();
+    if run_as_is {
+        want.extend(runtime.iter().cloned());
     }
-    let sizes: std::collections::BTreeSet<u64> = want.iter().map(|(b, _)| *b).collect();
+    if want.is_empty() && (run_as_is || runtime.is_empty()) {
+        return Vec::new();
+    }
+    // Hash against every size a claim looks at, so the runtime check can't miss by size.
+    let mut sizes: std::collections::BTreeSet<u64> = want.iter().map(|(b, _)| *b).collect();
+    sizes.extend(runtime.iter().map(|(b, _)| *b));
     let hashes = app_file_hashes(&ws.app_dir(), &sizes);
-    let used = want.iter().filter(|(_, h)| hashes.contains(h)).count();
-    Some(Claim::new(
-        "The build uses the game's own saved files",
-        used > 0,
-        format!(
-            "none of the files saved into capture/{FOCUS_DIR}/{RESOURCES_DIR}/ appear in the build; copy the ones the game uses into app/ and use them as they are"
-        ),
-    ))
+    let mut out = Vec::new();
+    if !want.is_empty() {
+        let used = want.iter().filter(|(_, h)| hashes.contains(h)).count();
+        out.push(Claim::new(
+            "The build uses the game's own saved files",
+            used > 0,
+            format!(
+                "none of the files saved into capture/{FOCUS_DIR}/{RESOURCES_DIR}/ appear in the build; copy the ones the game uses into app/ and use them as they are"
+            ),
+        ));
+    }
+    if !run_as_is && !runtime.is_empty() {
+        out.push(Claim::new(
+            "The game is the builder's own implementation",
+            !runtime.iter().any(|(_, h)| hashes.contains(h)),
+            "the original's compiled runtime is copied into the build and runs as the game: the person asked for a rebuild in your own code — reimplement it (only a request that asks for the game's own files to run as they are makes this right)",
+        ));
+    }
+    out
 }
 
 /// The sha256 of each file in `app` whose size is in `sizes` (only those can be one of the saved
@@ -961,9 +1005,10 @@ impl Check for WebVisualCheck {
         let mut artifacts = Vec::new();
         let mut unknowns = Vec::new();
         let mut claims = Vec::new();
-        // R2.12: the game's own saved files are the build's material by default, so a rebuild that
-        // reuses none of them (a from-scratch lookalike) fails here even when its pictures match.
-        claims.extend(originals_claim(ws));
+        // R2.12: the claims hold the build to what the focused brief asked for — the game's own
+        // files reused (never a from-scratch lookalike), and a true rebuild with the original's
+        // compiled runtime kept out unless the request asked for it to run as it is.
+        claims.extend(originals_claims(ws, run_as_is_asked(&ws.manifest.request)));
         for (name, dir, url) in &pages {
             let (original, built) = if dir.is_empty() { (originals.clone(), out.clone()) } else { (originals.join(dir), out.join(dir)) };
             // web_site_capture creates the page's own folder (it must not exist yet) inside one
@@ -1140,10 +1185,10 @@ mod tests {
         assert!(!mask_hides_everything(&half, &original).unwrap(), "most of the picture still compares");
     }
 
-    /// R2.12: with the focused part's own files saved, the brief makes them the build's material
-    /// by default — its assets as they are, its code what the build is written from — and says
-    /// never to replace the game with a from-scratch implementation; without them nothing says
-    /// so, and the base focus brief stays exactly as it was.
+    /// R2.12: with the focused part's own files saved, the brief asks for a true rebuild by
+    /// default — the builder's own web game, written from the original's code, with its art and
+    /// data as they are, never its compiled runtime as the game; without them nothing says so,
+    /// and the base focus brief stays exactly as it was.
     #[test]
     fn the_focus_brief_offers_the_saved_resources() {
         let d = tempfile::tempdir().unwrap();
@@ -1158,26 +1203,50 @@ mod tests {
         let text = focus_resources_brief(&focus, &ws).unwrap();
         for said in [
             "capture/focus/resources/",
-            "rebuilt from its own files, for their own use on this computer",
+            "true rebuild of this game",
+            "your own code that plays like it",
+            "web game in your own code",
             "use them as they are",
-            "Never redraw, regenerate or substitute",
-            "the game's own code is what you build from",
+            "never redraw, regenerate or substitute",
+            "the game's own code is what you write the game from",
             "adapt it into app/ keeping its meaning",
             "the same formulas, constants, timings and states",
-            "run those files as they are in app/",
-            "Never replace the game with a from-scratch implementation",
+            "app/MECHANICS.md",
+            "Never run the original's compiled runtime",
+            "formats_wasm_module_show",
             "js_sources_restore",
         ] {
             assert!(text.contains(said), "{said} missing from {text}");
         }
+        assert!(!text.contains("run those files as they are in app/"), "the runtime never runs as the game by default");
     }
 
-    /// R2.12: a focused rebuild that copies none of the game's own saved files (a from-scratch
-    /// lookalike) fails the claim whatever its pictures show; one that copies them passes. The
-    /// files the build adapts (scripts, stylesheets, pages) are not what the claim counts, and a
-    /// saved set of only those makes no claim at all.
+    /// R2.12: only a request that asks for the game's own files to run as they are gets that
+    /// brief (the words are read in one place); any other request gets the true rebuild.
     #[test]
-    fn a_build_that_reuses_none_of_the_games_own_files_fails_the_claim() {
+    fn a_request_to_run_the_original_as_it_is_gets_that_instead() {
+        assert!(run_as_is_asked("复刻它，原样运行原版"));
+        assert!(run_as_is_asked("Please run the original files as they are"));
+        assert!(!run_as_is_asked("复刻这个游戏，只关注游戏区域"));
+        let d = tempfile::tempdir().unwrap();
+        let ws = Workspace::create(d.path(), "Game", "复刻游戏，原样运行原版", TargetRef::Website { url: "https://x/".into() }).unwrap();
+        let res = ws.capture_dir().join(FOCUS_DIR).join(RESOURCES_DIR);
+        std::fs::create_dir_all(&res).unwrap();
+        std::fs::write(res.join("resources.json"), b"{}").unwrap();
+        let focus = Focus { what: "the game area".into(), element_id: None };
+        let text = focus_resources_brief(&focus, &ws).unwrap();
+        assert!(text.contains("run those files as they are in app/"), "{text}");
+        assert!(!text.contains("MECHANICS.md") && !text.contains("Never run the original's compiled runtime"), "{text}");
+    }
+
+    /// R2.12: the claims hold the build to what the brief asked for. A true rebuild reuses the
+    /// game's art and data and keeps its compiled runtime out (the game is the builder's own
+    /// implementation); a build that runs the original's runtime fails both. With a request for
+    /// the files to run as they are, the runtime in the build is what passes. The files the build
+    /// adapts (scripts, stylesheets, pages) are not what the claims count, and a saved set of
+    /// only those makes no claim at all.
+    #[test]
+    fn the_claims_hold_the_build_to_what_the_brief_asked() {
         let d = tempfile::tempdir().unwrap();
         let ws = Workspace::create(d.path(), "Game", "Clone the game, only the game area", TargetRef::Website { url: "https://x/".into() }).unwrap();
         let res = ws.capture_dir().join(FOCUS_DIR).join(RESOURCES_DIR);
@@ -1188,28 +1257,49 @@ mod tests {
             format!(
                 r#"{{"items":[
                     {{"type":"Image","bytes":9,"sha256":"{}","url":"https://x/art.png"}},
+                    {{"type":"Fetch","bytes":7,"sha256":"{}","url":"https://x/Build/Build.wasm.unityweb"}},
                     {{"type":"Script","bytes":4,"sha256":"{}","url":"https://x/game.js"}}
                 ]}}"#,
                 sha(b"png-bytes"),
+                sha(b"wasm-here"),
                 sha(b"code")
             ),
         )
         .unwrap();
-        let claim = originals_claim(&ws).unwrap();
-        assert!(!claim.passed && claim.title == "The build uses the game's own saved files", "{:?}", claim);
-        assert!(claim.detail.contains("capture/focus/resources/"), "{}", claim.detail);
-        // The one file the build copies is enough: the claim is the backstop against a build
-        // that reuses nothing, not a count of everything used.
+        fn by_title<'a>(claims: &'a [Claim], title: &str) -> &'a Claim {
+            match claims.iter().find(|c| c.title == title) {
+                Some(c) => c,
+                None => panic!("{title} missing from {claims:?}"),
+            }
+        }
+        // True rebuild, nothing copied: the from-scratch lookalike fails the reuse claim while
+        // the runtime claim holds.
+        let claims = originals_claims(&ws, false);
+        assert!(!by_title(&claims, "The build uses the game's own saved files").passed);
+        assert!(by_title(&claims, "The game is the builder's own implementation").passed);
+        // The game's art copied in: both hold.
         std::fs::create_dir_all(ws.app_dir().join("assets")).unwrap();
         std::fs::write(ws.app_dir().join("assets/art.png"), b"png-bytes").unwrap();
-        assert!(originals_claim(&ws).unwrap().passed, "the copied original reaches the build");
+        assert!(originals_claims(&ws, false).iter().all(|c| c.passed), "art reused, own implementation");
+        // The original's runtime copied in as the game instead: the runtime claim fails, and the
+        // reuse claim fails too — the runtime is not the art a true rebuild must use.
+        std::fs::remove_file(ws.app_dir().join("assets/art.png")).unwrap();
+        std::fs::write(ws.app_dir().join("Build.wasm.unityweb"), b"wasm-here").unwrap();
+        let claims = originals_claims(&ws, false);
+        assert!(!by_title(&claims, "The game is the builder's own implementation").passed);
+        assert!(!by_title(&claims, "The build uses the game's own saved files").passed, "the runtime doesn't count as art");
+        // A request for the game's own files to run as they are: the runtime is the build, one
+        // claim, and it holds.
+        let claims = originals_claims(&ws, true);
+        assert_eq!(claims.len(), 1, "{claims:?}");
+        assert!(by_title(&claims, "The build uses the game's own saved files").passed);
         // Scripts are adapted, not copied: a saved set of only scripts has nothing to require.
         std::fs::write(
             res.join("resources.json"),
             format!(r#"{{"items":[{{"type":"Script","bytes":4,"sha256":"{}","url":"https://x/game.js"}}]}}"#, sha(b"code")),
         )
         .unwrap();
-        assert!(originals_claim(&ws).is_none(), "only scripts: nothing to reuse as files");
+        assert!(originals_claims(&ws, false).is_empty(), "only scripts: nothing to claim about");
     }
 
     /// R2.11: the refine note names the part's own capture for a focused rebuild (one pair to
