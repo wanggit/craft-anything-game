@@ -830,7 +830,11 @@ every byte the game serves — through the browser's own network stack, iframe o
 game capture can keep them. Decided 2026-11-08: the game's own resources may be reused in the
 rebuild as they are; the code is rewritten keeping its meaning (the same formulas, constants,
 timings and states, in the builder's own code); a 1 GiB budget; only for game rebuilds (a focused
-embed), only the game body.
+embed), only the game body. Decided 2026-11-09 (the person, after a live run rebuilt a Unity game
+from scratch instead and only their reminder put it right): using the game's own files is the
+default, not just permitted — its assets and data as they are, and its code what the build is
+written from (adapted keeping its meaning; a compiled runtime run as it is, only the glue around
+it written anew), never a from-scratch reimplementation.
 - [x] The capture browser keeps the bytes: a new Deep-mode `web_resources_save` writes every
       response body the open page loaded (all frames) to files with a `resources.json` manifest
       (url → file, type, size, sha256, frame, how it was got), deduped by URL and content hash
@@ -847,6 +851,17 @@ embed), only the game body.
       build → check), and what the likeness bar reaches now — paired with R2.11's live line
       (ran 2026-11-08 on Sprunki at crazygames.com, a TurboWarp/Scratch game: 92% alike,
       5/5 claims, playable; the game's 598 assets had to be recovered by hand — see below)
+- [x] The focused brief makes the game's own files the default material (the person, after a live
+      run rebuilt a Unity game from scratch and only their reminder fixed it): its pictures,
+      sounds, fonts and data copied into app/ and used as they are, its code what the build is
+      written from — adapted keeping its meaning, a compiled runtime run as it is with only the
+      loader, bridge and UI around it — and never a from-scratch reimplementation
+      — claimed: claude, branch feature/r2.12-use-originals
+- [x] The web check catches a from-scratch build: a focused rebuild whose resources were saved
+      must reuse at least one of them unchanged (the claim reads capture/focus/resources/
+      resources.json and hashes the files in app/), so a lookalike that reuses none of the game's
+      own files can't pass on a matching boot screen alone
+      — claimed: claude, branch feature/r2.12-use-originals
 - [ ] After the save, fetch what the saved manifests name and the capture didn't see: the first
       live run's game defined 598 asset files and the browser had only requested part of them
       (lazy loading); the builder fetched the rest itself from the game's server. The tool should
