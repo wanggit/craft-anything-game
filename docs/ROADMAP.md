@@ -862,6 +862,21 @@ it written anew), never a from-scratch reimplementation.
       resources.json and hashes the files in app/), so a lookalike that reuses none of the game's
       own files can't pass on a matching boot screen alone
       — claimed: claude, branch feature/r2.12-use-originals; PR #10
+- [ ] The focused game rebuild is a true rebuild (the person, 2026-11-09: 真复刻; casual portal
+      games, web stack): the game is the builder's own web-stack implementation (HTML/JS — canvas,
+      Three.js as fits), written from the original's code — its readable code adapted, its compiled
+      logic recovered (unpacked data, metadata names, a disassembled wasm) into app/MECHANICS.md
+      and reimplemented — with the original's pictures, sounds, fonts and data used as they are.
+      The original's compiled runtime is never the game unless the request asks for it (then the
+      request's way is what happens). The claims enforce both halves: none of the game's own art
+      and data reused → fail; the original's compiled runtime copied into the build → fail, unless
+      the request asked to run the original's files as they are
+      — claimed: claude, branch feature/r2.12-wasm-rebuild
+- [ ] A few real true-rebuild attempts on casual portal games, measured: the likeness reached, how
+      much of the mechanics was recovered (app/MECHANICS.md against the original's numbers), and
+      where the tools stop short (a WebGL build's packed data, IL2CPP metadata in a WebGL export,
+      reading a wasm). The Ready bar is decided from those numbers (the person, 2026-11-09: don't
+      fix it before) — decision
 - [ ] After the save, fetch what the saved manifests name and the capture didn't see: the first
       live run's game defined 598 asset files and the browser had only requested part of them
       (lazy loading); the builder fetched the rest itself from the game's server. The tool should
