@@ -876,7 +876,7 @@ attempts (the person).
       request's way is what happens). The claims enforce both halves: none of the game's own art
       and data reused → fail; the original's compiled runtime copied into the build → fail, unless
       the request asked to run the original's files as they are
-      — claimed: claude, branch feature/r2.12-wasm-rebuild
+      — claimed: claude, branch feature/r2.12-wasm-rebuild; PR #12
 - [ ] A few real true-rebuild attempts on casual portal games, measured: the likeness reached, how
       much of the mechanics was recovered (app/MECHANICS.md against the original's numbers), and
       where the tools stop short (a WebGL build's packed data, IL2CPP metadata in a WebGL export,
