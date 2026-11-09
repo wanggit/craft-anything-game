@@ -96,7 +96,7 @@ fn focus_resources_brief(focus: &Focus, ws: &Workspace) -> Option<String> {
          - Build it as a web game in your own code (HTML and JavaScript — canvas, Three.js or whatever fits), unless their request names another stack. No game-engine project.\n\
          - Pictures, sounds, fonts and data: copy every one the game uses into app/ and use them as they are — never redraw, regenerate or substitute a file that is already here. Its lists and tables (levels, items, prices, timings) go in unchanged.\n\
          - Code: the game's own code is what you write the game from. Read it first (js_sources_restore and js_app_map for bundles; data files open as they are). Where its logic is readable (scripts, project data), adapt it into app/ keeping its meaning — the same formulas, constants, timings and states. Where it is compiled (a wasm build, engine data), recover what it does before you write a line: formats_wasm_module_show reads a wasm module; game_unity_list and game_unity_asset_export read Unity data and bundles (decompress .unityweb streams first, keeping the decompressor inside the project folder); game_unity_code_names_show names a Unity build's classes, methods and fields from its metadata. Put every constant, formula and rule you recover into app/MECHANICS.md with where it came from (a file, a name or address, or an evidence id) or mark it \"estimated\", then implement the game from that sheet.\n\
-         - Never run the original's compiled runtime (its wasm or engine data) as the game: the game is your own implementation. If something can't be read or recovered, record it with core_unknown_add and say what you did instead in your summary."
+         - Never run the game's own compiled runtime (a Unity or Unreal build, its engine data) as the game: the game is your own implementation. Open-source libraries it ships — engines like PlayCanvas, codecs like draco, physics, loaders — are yours to use as they are, copied into app/ unchanged: open-source libraries are never rebuilt. If something can't be read or recovered, record it with core_unknown_add and say what you did instead in your summary."
     ))
 }
 
@@ -804,6 +804,12 @@ fn check_scope(ws: &Workspace) -> PathBuf {
     }
 }
 
+/// Open-source libraries a game may ship and the rebuild may use as they are — engines like
+/// PlayCanvas, codecs like draco, physics and loaders (the person, 2026-11-09: open-source
+/// libraries are never rebuilt). Matched by name in the saved file's address: one of these in
+/// app/ is not "the game running".
+const OPEN_SOURCE_LIBRARIES: &[&str] = &["draco", "ammo", "physx", "bullet", "box2d", "rapier", "zstd", "basis", "meshopt", "ktx", "rhino3dm"];
+
 /// The claims about the game's own saved files (R2.12): what the focused brief asked for is what
 /// must show up in the build. The default is a true rebuild — the game's art and data reused
 /// unchanged, and its compiled runtime kept out of app/ (the game is the builder's own
@@ -827,7 +833,8 @@ fn originals_claims(ws: &Workspace, run_as_is: bool) -> Vec<Claim> {
         }
         let (Some(bytes), Some(sha)) = (it.get("bytes").and_then(Value::as_u64), it.get("sha256").and_then(Value::as_str)) else { continue };
         let url = it.get("url").and_then(Value::as_str).unwrap_or_default().split(['?', '#']).next().unwrap_or_default().to_ascii_lowercase();
-        if [".wasm", ".unityweb", ".pck", ".data"].iter().any(|e| url.ends_with(e)) {
+        let compiled = [".wasm", ".unityweb", ".pck", ".data"].iter().any(|e| url.ends_with(e));
+        if compiled && !OPEN_SOURCE_LIBRARIES.iter().any(|l| url.contains(l)) {
             runtime.insert((bytes, sha.to_string()));
         } else {
             art.insert((bytes, sha.to_string()));
@@ -859,7 +866,7 @@ fn originals_claims(ws: &Workspace, run_as_is: bool) -> Vec<Claim> {
         out.push(Claim::new(
             "The game is the builder's own implementation",
             !runtime.iter().any(|(_, h)| hashes.contains(h)),
-            "the original's compiled runtime is copied into the build and runs as the game: the person asked for a rebuild in your own code — reimplement it (only a request that asks for the game's own files to run as they are makes this right)",
+            "the game's own compiled runtime is copied into the build and runs as the game: the person asked for a rebuild in your own code — reimplement it (an open-source library it ships is fine as it is; only a request that asks for the game's own files to run as they are makes this right)",
         ));
     }
     out
@@ -1212,7 +1219,9 @@ mod tests {
             "adapt it into app/ keeping its meaning",
             "the same formulas, constants, timings and states",
             "app/MECHANICS.md",
-            "Never run the original's compiled runtime",
+            "Never run the game's own compiled runtime",
+            "Open-source libraries it ships",
+            "open-source libraries are never rebuilt",
             "formats_wasm_module_show",
             "js_sources_restore",
         ] {
@@ -1240,8 +1249,9 @@ mod tests {
     }
 
     /// R2.12: the claims hold the build to what the brief asked for. A true rebuild reuses the
-    /// game's art and data and keeps its compiled runtime out (the game is the builder's own
-    /// implementation); a build that runs the original's runtime fails both. With a request for
+    /// game's art and data and keeps its own compiled runtime out (the game is the builder's own
+    /// implementation), while an open-source library it ships is fine as it is; a build that runs
+    /// the game's runtime fails both. With a request for
     /// the files to run as they are, the runtime in the build is what passes. The files the build
     /// adapts (scripts, stylesheets, pages) are not what the claims count, and a saved set of
     /// only those makes no claim at all.
@@ -1258,10 +1268,12 @@ mod tests {
                 r#"{{"items":[
                     {{"type":"Image","bytes":9,"sha256":"{}","url":"https://x/art.png"}},
                     {{"type":"Fetch","bytes":7,"sha256":"{}","url":"https://x/Build/Build.wasm.unityweb"}},
+                    {{"type":"Fetch","bytes":6,"sha256":"{}","url":"https://x/draco.wasm.wasm"}},
                     {{"type":"Script","bytes":4,"sha256":"{}","url":"https://x/game.js"}}
                 ]}}"#,
                 sha(b"png-bytes"),
                 sha(b"wasm-here"),
+                sha(b"draco!"),
                 sha(b"code")
             ),
         )
@@ -1281,9 +1293,14 @@ mod tests {
         std::fs::create_dir_all(ws.app_dir().join("assets")).unwrap();
         std::fs::write(ws.app_dir().join("assets/art.png"), b"png-bytes").unwrap();
         assert!(originals_claims(&ws, false).iter().all(|c| c.passed), "art reused, own implementation");
-        // The original's runtime copied in as the game instead: the runtime claim fails, and the
+        // An open-source library it ships (a draco decoder) is not "the game running": copied in
+        // beside the art, both claims still hold.
+        std::fs::write(ws.app_dir().join("draco.wasm.wasm"), b"draco!").unwrap();
+        assert!(originals_claims(&ws, false).iter().all(|c| c.passed), "an open-source library is fine as it is");
+        // The game's own runtime copied in as the game instead: the runtime claim fails, and the
         // reuse claim fails too — the runtime is not the art a true rebuild must use.
         std::fs::remove_file(ws.app_dir().join("assets/art.png")).unwrap();
+        std::fs::remove_file(ws.app_dir().join("draco.wasm.wasm")).unwrap();
         std::fs::write(ws.app_dir().join("Build.wasm.unityweb"), b"wasm-here").unwrap();
         let claims = originals_claims(&ws, false);
         assert!(!by_title(&claims, "The game is the builder's own implementation").passed);
