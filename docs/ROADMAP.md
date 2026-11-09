@@ -889,7 +889,19 @@ true-rebuild attempts (the person).
       much of the mechanics was recovered (app/MECHANICS.md against the original's numbers), and
       where the tools stop short (a WebGL build's packed data, IL2CPP metadata in a WebGL export,
       reading a wasm). The Ready bar is decided from those numbers (the person, 2026-11-09: don't
-      fix it before) — decision
+      fix it before) — decision. Attempt 1 (Fashion Battle, a PlayCanvas game, 2026-11-09):
+      99.92% alike (100% at 1440/768/390 on the boot state), 6/6 claims, Ready in 2 rounds after
+      one provider "high risk" rejection cut the first turn; the decompiled-mechanics path was not
+      exercised (the game's code is readable PlayCanvas source, adapted 1:1 into 112 scripts), and
+      its 1042 lazy-loaded assets were never captured, so the first pass shipped typed
+      placeholders until a re-run pulled the real files (MD5-verified) from the game's own server
+- [ ] The focused brief never accepts placeholders when the game's own files can be fetched: a
+      true rebuild downloads the missing originals from the game's own server instead of typed
+      stand-ins (attempt 1 shipped 1042 placeholders and passed every claim until the person
+      found the wardrobe blank; placeholders must not count as "using the originals")
+- [ ] `web_resources_save` keeps the original request names (attempt 1: files fetched with `?t=`
+      cache-busters were stored under hash-suffixed names, and the rebuild 404'd on the original
+      URLs until the builder renamed them back by hand)
 - [ ] After the save, fetch what the saved manifests name and the capture didn't see: the first
       live run's game defined 598 asset files and the browser had only requested part of them
       (lazy loading); the builder fetched the rest itself from the game's server. The tool should
