@@ -838,8 +838,11 @@ builder's own web-stack game (casual portal games are the scope; HTML/JS, canvas
 its code written from the original's (readable code adapted keeping its meaning; compiled logic
 recovered — unpacked data, metadata names, a disassembled wasm — into app/MECHANICS.md and
 reimplemented), the original's assets and data as they are; the game's own files run as they are
-only when the request asks for that. The Ready bar waits for a few measured true-rebuild
-attempts (the person).
+only when the request asks for that. Decided again (the person, same day): open-source libraries
+the game ships — a PlayCanvas engine, a draco decoder, physics or loaders — are used as they are
+and never rebuilt; only the game's own code is the builder's to write, and the claims' compiled
+runtime check exempts the libraries the catalogue names. The Ready bar waits for a few measured
+true-rebuild attempts (the person).
 - [x] The capture browser keeps the bytes: a new Deep-mode `web_resources_save` writes every
       response body the open page loaded (all frames) to files with a `resources.json` manifest
       (url → file, type, size, sha256, frame, how it was got), deduped by URL and content hash
@@ -877,6 +880,11 @@ attempts (the person).
       and data reused → fail; the original's compiled runtime copied into the build → fail, unless
       the request asked to run the original's files as they are
       — claimed: claude, branch feature/r2.12-wasm-rebuild; PR #12
+- [ ] Open-source libraries the game ships (a PlayCanvas engine, a draco decoder, physics and
+      loaders) are used as they are and never rebuilt: the brief says so, and the claims'
+      compiled-runtime check exempts the libraries the catalogue names (by the saved file's
+      address), so a codec or engine in app/ is not "the game running"
+      — claimed: claude, branch feature/r2.12-open-source-libs
 - [ ] A few real true-rebuild attempts on casual portal games, measured: the likeness reached, how
       much of the mechanics was recovered (app/MECHANICS.md against the original's numbers), and
       where the tools stop short (a WebGL build's packed data, IL2CPP metadata in a WebGL export,
