@@ -155,6 +155,7 @@ cargo clippy -p <crates> --all-targets -- -D warnings
 cargo xtask layers
 cargo xtask locks
 cargo xtask secrets       # no keys, tokens or local paths in what you commit
+cargo xtask i18n-coverage # if you added UI strings or tool titles (commit every catalog)
 cargo xtask wasm          # if you touched L0–L2
 cargo xtask tools         # if you added tools (commit docs/tools.md)
 ```
