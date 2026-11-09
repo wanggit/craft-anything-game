@@ -633,6 +633,18 @@ list: scan the folders people keep such things in (`KnownRoot`, by folder name, 
 levels down), and make an install use a copy already found outside our store. Test each layout
 (unzipped, cask, capitalised name) with temp folders, not the machine the test runs on.
 
+**"Rewrite its code in your own code" rebuilt the game from scratch.** A focused game's brief
+said its saved files could be used as they are and its code "rewritten in your own code, keeping
+its meaning — never pasting the original's text"; the game shipped its code as a compiled Unity
+runtime, so the builder read the line as "write the game yourself": its own art, its own gameplay,
+and still 100% alike because the capture showed only the boot dialog. The person's one message
+("use the original's assets, adapt the original's code") put it right in a turn. When the
+original's own files exist, say what happens to each kind of them — assets and data used as they
+are, readable code adapted from the original's, compiled runtimes run as they are with only the
+glue around them — and never leave "rewrite the code" standing alone; a check that photographs
+only the boot screen can't tell a reimplementation from the original, so it must also see that
+the game's own files are in the build.
+
 ## Agent tooling
 
 **Shared CLI efforts reached Claude unchanged.** Keep CLI-only levels available for agents, but
