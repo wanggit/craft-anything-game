@@ -640,10 +640,13 @@ runtime, so the builder read the line as "write the game yourself": its own art,
 and still 100% alike because the capture showed only the boot dialog. The person's one message
 ("use the original's assets, adapt the original's code") put it right in a turn. When the
 original's own files exist, say what happens to each kind of them — assets and data used as they
-are, readable code adapted from the original's, compiled runtimes run as they are with only the
-glue around them — and never leave "rewrite the code" standing alone; a check that photographs
-only the boot screen can't tell a reimplementation from the original, so it must also see that
-the game's own files are in the build.
+are, readable code adapted from the original's, compiled logic recovered and reimplemented — and
+never leave "rewrite the code" standing alone; a check that photographs only the boot screen
+can't tell a reimplementation from the original, so it must also see that the game's own files
+are in the build and its compiled runtime is not. And ask which reading a person means before
+turning a fix's behaviour into a default: "adapt the original's code" meant reimplementation, and
+the fix's run-the-original shortcut became the default for a day until the person asked why the
+game had not been rebuilt at all.
 
 ## Agent tooling
 

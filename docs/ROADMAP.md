@@ -832,9 +832,14 @@ rebuild as they are; the code is rewritten keeping its meaning (the same formula
 timings and states, in the builder's own code); a 1 GiB budget; only for game rebuilds (a focused
 embed), only the game body. Decided 2026-11-09 (the person, after a live run rebuilt a Unity game
 from scratch instead and only their reminder put it right): using the game's own files is the
-default, not just permitted — its assets and data as they are, and its code what the build is
-written from (adapted keeping its meaning; a compiled runtime run as it is, only the glue around
-it written anew), never a from-scratch reimplementation.
+default, not just permitted. Decided again later the same day (the person asked what "改写" had
+meant): a compiled runtime is not run as it is. The rebuild is a true rebuild (真复刻) — the
+builder's own web-stack game (casual portal games are the scope; HTML/JS, canvas or Three.js),
+its code written from the original's (readable code adapted keeping its meaning; compiled logic
+recovered — unpacked data, metadata names, a disassembled wasm — into app/MECHANICS.md and
+reimplemented), the original's assets and data as they are; the game's own files run as they are
+only when the request asks for that. The Ready bar waits for a few measured true-rebuild
+attempts (the person).
 - [x] The capture browser keeps the bytes: a new Deep-mode `web_resources_save` writes every
       response body the open page loaded (all frames) to files with a `resources.json` manifest
       (url → file, type, size, sha256, frame, how it was got), deduped by URL and content hash
@@ -862,7 +867,7 @@ it written anew), never a from-scratch reimplementation.
       resources.json and hashes the files in app/), so a lookalike that reuses none of the game's
       own files can't pass on a matching boot screen alone
       — claimed: claude, branch feature/r2.12-use-originals; PR #10
-- [ ] The focused game rebuild is a true rebuild (the person, 2026-11-09: 真复刻; casual portal
+- [x] The focused game rebuild is a true rebuild (the person, 2026-11-09: 真复刻; casual portal
       games, web stack): the game is the builder's own web-stack implementation (HTML/JS — canvas,
       Three.js as fits), written from the original's code — its readable code adapted, its compiled
       logic recovered (unpacked data, metadata names, a disassembled wasm) into app/MECHANICS.md

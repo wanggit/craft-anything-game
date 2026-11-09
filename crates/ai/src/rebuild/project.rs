@@ -73,6 +73,35 @@ pub fn read_focus(request: &str) -> Option<Focus> {
     (game && scoped).then(|| Focus { what: "the game area".into(), element_id: None })
 }
 
+/// Whether the request asks for the original's own files to run as they are (the only way a
+/// rebuild runs the original's compiled runtime instead of a true rebuild — R2.12). This is the
+/// one place these words are read: the focused brief and the claims follow this answer. Default
+/// false: a rebuild is a true rebuild (the builder's own code) unless the person asks for this.
+pub fn run_as_is_asked(request: &str) -> bool {
+    let r = request.to_lowercase();
+    [
+        "原样跑",
+        "原样运行",
+        "原封不动",
+        "直接运行原版",
+        "直接运行原游戏",
+        "用原版文件运行",
+        "运行原版文件",
+        "运行原游戏文件",
+        "把原版跑起来",
+        "把原游戏跑起来",
+        "run the original as it is",
+        "run the original as they are",
+        "run the original files",
+        "run the original's own files",
+        "run the original unmodified",
+        "run the game's own files",
+        "run it unmodified",
+    ]
+    .iter()
+    .any(|p| r.contains(p))
+}
+
 /// A new project for `request` about `target` (a web address, an absolute path, or `-` for none),
 /// at `place`, with the stack the person
 /// picked (`build_with`), the asset budget from settings, and `generate_assets`: the person lets the
