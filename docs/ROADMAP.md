@@ -880,11 +880,11 @@ true-rebuild attempts (the person).
       and data reused → fail; the original's compiled runtime copied into the build → fail, unless
       the request asked to run the original's files as they are
       — claimed: claude, branch feature/r2.12-wasm-rebuild; PR #12
-- [ ] Open-source libraries the game ships (a PlayCanvas engine, a draco decoder, physics and
+- [x] Open-source libraries the game ships (a PlayCanvas engine, a draco decoder, physics and
       loaders) are used as they are and never rebuilt: the brief says so, and the claims'
       compiled-runtime check exempts the libraries the catalogue names (by the saved file's
       address), so a codec or engine in app/ is not "the game running"
-      — claimed: claude, branch feature/r2.12-open-source-libs
+      — claimed: claude, branch feature/r2.12-open-source-libs; PR #14
 - [ ] A few real true-rebuild attempts on casual portal games, measured: the likeness reached, how
       much of the mechanics was recovered (app/MECHANICS.md against the original's numbers), and
       where the tools stop short (a WebGL build's packed data, IL2CPP metadata in a WebGL export,
