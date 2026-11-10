@@ -86,6 +86,7 @@ Issues are ranked by people affected and how badly, after leaving out what's alr
 | 3 | R2.9 Everyday use, R2.10 Pinned builds | — | Open to anyone at any time; most lines stand alone |
 | 3 | R2.11 Scoped rebuilds | — | A live game rebuild was checked against the site's chrome, not the game |
 | 3 | R2.12 Game rebuilds get the game's own code and resources | R2.11 *(soft)* | Screenshots leave a builder nothing of how a game plays; the capture browser already loaded every byte |
+| 3 | R2.13 Game rebuilds see the game | R2.12 | Two 100% scores on games that played nothing like the original: the check never saw the game |
 | 3 | R1.5 | — | Small leftovers |
 | Any | M3: R3.3, R3.9, R3.11, R3.14 | — | Open lane |
 | Later | R4.1 macOS CLI, R4.2 Managed tier | **decision** | Not before M5 |
@@ -913,6 +914,48 @@ true-rebuild attempts (the person).
       settled frame (or a build's declared ready signal) before photographing
 - [ ] `capture_focus`'s step message double-says "the" ("Photographing the the game area") —
       focus.what already carries its article
+
+---
+
+### R2.13 Game rebuilds see the game
+Owner: open · Status: in progress
+A wasm game rebuilt twice over scored 100% both times while playing nothing like the original: the
+capture only ever photographed the boot screen, so the builder invented the game behind it and
+the check could not tell (Who Dies Last, 2026-11-10 — the person had to supply live play
+screenshots before the rebuild became the game). The person's plan (2026-11-10): capture the
+game's play states automatically, compare them in the checks, ship the asset and wasm recovery as
+tools instead of builder-built scripts, stage the brief so analysis cannot eat the build, and
+survive provider outages. One pass means: the study produces assets + mechanics + state
+references, the builder works from tools without writing analysis code, and the check compares
+the states.
+- [x] The study photographs the game's play states and the check compares them: after the focus
+      capture, a best-effort auto-player clicks into the game (DOM buttons, then canvas clicks at
+      the common button spots) and photographs each materially new state into
+      capture/focus/play-states/ with states.json (file, the action that reached it); no change
+      for two attempts ends it, and the step says honestly what it reached. The web check replays
+      the same actions against the build, pairs each build state with the closest recorded one
+      (picture likeness), and claims hold the build to every recorded state having a match — a
+      boot-screen 100% no longer carries a game (claims at a 50% floor — the finish bar waits
+      for measurement)
+      — claimed: claude, branch feature/r2.13-play-states; PR #16
+- [ ] The asset pipeline is tools, not builder scripts (extends R3.9): crunch/ETC2/DXT texture
+      decode and export, sprite-atlas rect resolution (the missing external SpriteAtlas captured
+      with the game), audio out — one `game_assets_extract` fills app/Original/ with a source
+      manifest
+- [ ] wasm/IL2CPP recovery is tools: `game_il2cpp_map` (metadata names ↔ wasm functions),
+      `game_wasm_decompile` (per-function disassembly and constants), `game_config_dump`
+      (serialized config fields), and the MECHANICS.md contract check (values cite functions or
+      addresses, estimates labelled) extends to web games
+- [ ] The brief is staged and bounded: extract assets → recover mechanics → build UI against the
+      state references → implement from the numbers → verify per state; no builder-built analysis
+      tooling (the tools above exist), an analysis budget, and a new session per stage (a 14 MB
+      session 400'd the provider twice)
+- [ ] Placeholders never stand in for fetchable originals (the Fashion Battle wardrobe shipped
+      blank behind passing claims): a missing file is fetched from the game's own server, and a
+      stand-in must be labelled and refused by the claims
+- [ ] Run resilience: 400s and dropped connections retry with backoff and resume the agent
+      session on their own (two attempts gave up mid-outage today), and a resume prompt travels
+      as an argument (stdin came out empty and the turn ran with no prompt at all)
 
 ---
 

@@ -300,6 +300,30 @@ impl Worker {
                             )?,
                         }
                     }
+                    // The game's play states (R2.13): tap through it the way a player would and
+                    // photograph each new screen — the check replays these against the build, so
+                    // a rebuild of the boot screen alone can no longer pass as the game.
+                    let states = self.call(
+                        "web_game_states_capture",
+                        json!({"output_directory": out.join(kinds::website::PLAY_STATES_DIR).display().to_string(), "max_states": 5}),
+                    );
+                    match states {
+                        Ok(_) => self.step(
+                            ws,
+                            Step::Study,
+                            Status::Inspecting,
+                            &format!("Photographed the {}'s play states into {}/{}/.", focus.what, kinds::website::FOCUS_DIR, kinds::website::PLAY_STATES_DIR),
+                        )?,
+                        Err(e) => self.step(
+                            ws,
+                            Step::Study,
+                            Status::Inspecting,
+                            &format!(
+                                "The {}'s play states couldn't be photographed ({}); only the screens already captured are compared.",
+                                focus.what, e.message
+                            ),
+                        )?,
+                    }
                     return Ok(());
                 }
                 Err(e) => self.step(
