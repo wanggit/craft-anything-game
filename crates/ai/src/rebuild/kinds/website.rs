@@ -98,7 +98,7 @@ fn focus_resources_brief(focus: &Focus, ws: &Workspace) -> Option<String> {
     Some(format!(
         "{files} The person wants a true rebuild of this game: your own code that plays like it, written from its code, for their own use on this computer. That is what you do by default — where anything above says to rebuild the behaviour yourself, use placeholders, or keep the original's code out of app/, this game's own files and code win.\n\
          - Build it as a web game in your own code (HTML and JavaScript — canvas, Three.js or whatever fits), unless their request names another stack. No game-engine project.\n\
-         - Pictures, sounds, fonts and data: copy every one the game uses into app/ and use them as they are — never redraw, regenerate or substitute a file that is already here. Its lists and tables (levels, items, prices, timings) go in unchanged.\n\
+         - Pictures, sounds, fonts and data: copy every one the game uses into app/ and use them as they are — never redraw, regenerate or substitute a file that is already here. Its lists and tables (levels, items, prices, timings) go in unchanged. When a file the game needs wasn't saved, fetch the original from the game's own server before anything else; a stand-in is the last resort, and every stand-in or fetched file is named in app/stand-ins.json ({{\"file\": \"…\", \"kind\": \"stand-in\" or \"original\", \"stands_for\": \"…\"}}) — the checks fail an asset that is neither the game's own nor named there.\n\
          - Code: the game's own code is what you write the game from. Read it first (js_sources_restore and js_app_map for bundles; data files open as they are). Where its logic is readable (scripts, project data), adapt it into app/ keeping its meaning — the same formulas, constants, timings and states. Where it is compiled (a wasm build, engine data), recover what it does before you write a line: formats_wasm_module_show reads a wasm module; game_unity_list and game_unity_asset_export read Unity data and bundles (decompress .unityweb streams first, keeping the decompressor inside the project folder); game_unity_code_names_show names a Unity build's classes, methods and fields from its metadata. Put every constant, formula and rule you recover into app/MECHANICS.md with where it came from (a file, a name or address, or an evidence id) or mark it \"estimated\", then implement the game from that sheet.\n\
          - Never run the game's own compiled runtime (a Unity or Unreal build, its engine data) as the game: the game is your own implementation. Open-source libraries it ships — engines like PlayCanvas, codecs like draco, physics, loaders — are yours to use as they are, copied into app/ unchanged: open-source libraries are never rebuilt. If something can't be read or recovered, record it with core_unknown_add and say what you did instead in your summary."
     ))
@@ -1008,6 +1008,93 @@ fn play_states_note(cx: &CheckCx, ws: &Workspace, out: &Path, unknowns: &mut Vec
     Ok(Some(format!("play states: {reached} of {} recorded screens reached and compared ({}).", pairs.len(), parts.join(", "))))
 }
 
+/// Asset-like files that must come from the game or carry a name in `stand-ins.json`: the
+/// pictures, sounds, fonts and data a stand-in could hide behind. Code and notes are the
+/// builder's own and don't belong here.
+const ASSET_KINDS: &[&str] = &[
+    "png", "jpg", "jpeg", "webp", "gif", "svg", "bmp", "ico", "mp3", "ogg", "wav", "m4a", "ttf", "otf", "woff", "woff2", "glb", "bin", "ktx2", "dds", "tga",
+    "mp4", "webm",
+];
+
+/// Every asset in the build is the game's own or named in `app/stand-ins.json` (R2.13): a
+/// stand-in never hides (the Fashion Battle wardrobe shipped blank behind passing claims). The
+/// note counts what the person is looking at: originals as-is, fetched originals and stand-ins.
+/// Only meaningful where saved originals exist to match against.
+fn assets_provenance_claim(ws: &Workspace) -> Option<(Claim, String)> {
+    let saved = read_json(&ws.capture_dir().join(FOCUS_DIR).join(RESOURCES_DIR).join("resources.json"))?;
+    let saved: std::collections::BTreeSet<String> = saved
+        .get("items")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|i| i.get("sha256").and_then(Value::as_str).map(str::to_string))
+        .collect();
+    let stand_ins = read_json(&ws.app_dir().join("stand-ins.json"));
+    let named: std::collections::BTreeMap<String, String> = stand_ins
+        .as_ref()
+        .and_then(|v| v.get("files"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|f| {
+            let file = f.get("file").and_then(Value::as_str)?.trim_start_matches("./").to_string();
+            let kind = f.get("kind").and_then(Value::as_str).unwrap_or("stand-in").to_string();
+            Some((file, kind))
+        })
+        .collect();
+    // The assets under app/ (bounded walk; code and notes are not assets).
+    let mut stack = vec![ws.app_dir()];
+    let mut seen = 0u64;
+    let (mut originals, mut fetched, mut standins, mut unlisted) = (0usize, 0usize, 0usize, Vec::new());
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for e in entries.flatten() {
+            if seen >= 50_000 {
+                break;
+            }
+            seen += 1;
+            let path = e.path();
+            let Ok(meta) = std::fs::symlink_metadata(&path) else { continue };
+            if meta.is_dir() {
+                if !matches!(e.file_name().to_string_lossy().as_ref(), "node_modules" | ".git") {
+                    stack.push(path);
+                }
+                continue;
+            }
+            if !meta.is_file() {
+                continue;
+            }
+            let ext = path.extension().and_then(|x| x.to_str()).unwrap_or_default().to_ascii_lowercase();
+            if !ASSET_KINDS.contains(&ext.as_str()) {
+                continue;
+            }
+            let rel = path.strip_prefix(ws.app_dir()).unwrap_or(&path).to_string_lossy().replace("\\", "/");
+            let hash = std::fs::read(&path).ok().map(|b| craft_anything_evidence::sha256_hex(&b));
+            match hash {
+                Some(h) if saved.contains(&h) => originals += 1,
+                _ => match named.get(&rel) {
+                    Some(k) if k == "original" => fetched += 1,
+                    Some(_) => standins += 1,
+                    None => unlisted.push(rel),
+                },
+            }
+        }
+    }
+    let note = format!(
+        "assets: {originals} the game's own as-is, {fetched} fetched from the game's server and {standins} stand-ins, each named in app/stand-ins.json."
+    );
+    let claim = Claim::new(
+        "Every asset in the build is the game's own or a labelled stand-in",
+        unlisted.is_empty(),
+        format!(
+            "not from the game and not named in app/stand-ins.json: {}{}",
+            unlisted.iter().take(5).cloned().collect::<Vec<_>>().join(", "),
+            if unlisted.len() > 5 { format!(" (and {} more)", unlisted.len() - 5) } else { String::new() }
+        ),
+    );
+    Some((claim, note))
+}
+
 /// "the game area" → "The game area", for a claim's title.
 fn capitalized(what: &str) -> String {
     let mut c = what.chars();
@@ -1120,6 +1207,12 @@ impl Check for WebVisualCheck {
         // files reused (never a from-scratch lookalike), and a true rebuild with the original's
         // compiled runtime kept out unless the request asked for it to run as it is.
         claims.extend(originals_claims(ws, run_as_is_asked(&ws.manifest.request)));
+        // R2.13: every asset in the build is the game's own or named in stand-ins.json — a
+        // stand-in never hides behind a passing check (the Fashion Battle wardrobe).
+        if let Some((claim, note)) = assets_provenance_claim(ws) {
+            claims.push(claim);
+            notes.push(note);
+        }
         for (name, dir, url) in &pages {
             let (original, built) = if dir.is_empty() { (originals.clone(), out.clone()) } else { (originals.join(dir), out.join(dir)) };
             // web_site_capture creates the page's own folder (it must not exist yet) inside one
@@ -1449,6 +1542,37 @@ mod tests {
         assert!(claims[0].passed && claims[0].detail.is_empty(), "{:?}", claims[0]);
         assert!(!claims[1].passed && claims[1].detail.contains("30% alike"), "{:?}", claims[1]);
         assert!(!claims[2].passed && claims[2].detail.contains("never showed"), "{:?}", claims[2]);
+    }
+
+    /// R2.13: an asset that is neither the game's own nor named in app/stand-ins.json fails the
+    /// claim (a stand-in never hides behind a passing check); named stand-ins and fetched
+    /// originals pass and are counted, and the builder's own code is not an asset at all.
+    #[test]
+    fn a_stand_in_never_hides() {
+        let d = tempfile::tempdir().unwrap();
+        let ws = Workspace::create(d.path(), "Game", "Clone the game", TargetRef::Website { url: "https://x/".into() }).unwrap();
+        let res = ws.capture_dir().join(FOCUS_DIR).join(RESOURCES_DIR);
+        std::fs::create_dir_all(&res).unwrap();
+        let sha = craft_anything_evidence::sha256_hex(b"real-bytes");
+        std::fs::write(res.join("resources.json"), format!(r#"{{"items":[{{"sha256":"{sha}"}}]}}"#)).unwrap();
+        let assets = ws.app_dir().join("assets");
+        std::fs::create_dir_all(&assets).unwrap();
+        std::fs::write(assets.join("real.png"), b"real-bytes").unwrap();
+        std::fs::write(assets.join("made.png"), b"drawn-by-hand").unwrap();
+        std::fs::write(assets.join("fake.png"), b"stand-in").unwrap();
+        std::fs::write(ws.app_dir().join("game.js"), b"// the builder's own code").unwrap();
+        let (claim, _note) = assets_provenance_claim(&ws).unwrap();
+        assert!(!claim.passed && claim.detail.contains("assets/made.png"), "{:?}", claim);
+        assert!(claim.detail.contains("stand-ins.json"), "{:?}", claim);
+        // Listing it passes the claim; the note counts what is what.
+        std::fs::write(
+            ws.app_dir().join("stand-ins.json"),
+            r#"{"files":[{"file":"assets/fake.png","kind":"stand-in"},{"file":"assets/made.png","kind":"original","stands_for":"Dress.png"}]}"#,
+        )
+        .unwrap();
+        let (claim, note) = assets_provenance_claim(&ws).unwrap();
+        assert!(claim.passed && claim.detail.is_empty(), "{:?}", claim);
+        assert!(note.contains("1 the game's own as-is") && note.contains("1 fetched") && note.contains("1 stand-ins"), "{note}");
     }
 
     /// R2.11: the refine note names the part's own capture for a focused rebuild (one pair to
