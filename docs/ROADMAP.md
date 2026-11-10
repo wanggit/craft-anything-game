@@ -949,7 +949,7 @@ the states.
       store holds; the extract and the single export decode crunched formats through it, and say
       the one command that builds it when it's missing): builders keep rebuilding it from source,
       hours per game
-      — claimed: claude, branch feature/r2.13-unity-codec
+      — claimed: claude, branch feature/r2.13-unity-codec; PR #18
 - [ ] ETC2 texture decode joins it (a Rust decoder or the converter kit extended): the plain
       ETC2 family is the other format the games actually ship
 - [ ] Sprite-atlas rect resolution (the missing external SpriteAtlas captured with the game) and
