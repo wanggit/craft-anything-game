@@ -28,7 +28,7 @@ pub fn specs() -> Vec<ToolSpec> {
     vec![spec(
         "game_unity_code_names_show",
         "Read a Unity game's IL2CPP metadata",
-        "Read a Unity IL2CPP global-metadata.dat (path: the file, or a game's folder, where it's found under *_Data/il2cpp_data/Metadata or Data/il2cpp_data/Metadata): the metadata version, its assemblies (images) and how many types, methods, fields and string literals it names. view picks a list to page: images, types (namespace, name, assembly, method and field counts), methods (name, declaring type, parameter count) or strings (the string literals, each shown up to 4096 bytes); contains keeps rows holding that text (any case). Versions 24 (its later 264-byte-header form), 27, 29 and 31 are read, each only after the file proves it fits; other versions give their header and say so. Many games change or encrypt this file: that's stated plainly and nothing is decrypted or guessed. Only names are here, with no code or addresses.",
+        "Read a Unity IL2CPP global-metadata.dat (path: the file, or a game's folder, where it's found under *_Data/il2cpp_data/Metadata or Data/il2cpp_data/Metadata): the metadata version, its assemblies (images) and how many types, methods, fields and string literals it names. view picks a list to page: images, types (namespace, name, assembly, method and field counts), methods (name, declaring type, parameter count), fields (name, the type that declares it, and its type index into the game's own registry) or strings (the string literals, each shown up to 4096 bytes); contains keeps rows holding that text (any case). Versions 24 (its later 264-byte-header form), 27, 29 and 31 are read, each only after the file proves it fits; other versions give their header and say so. Many games change or encrypt this file: that's stated plainly and nothing is decrypted or guessed. Only names are here, with no code or addresses.",
         "See the names of the code inside a Unity game built with IL2CPP, even though the code itself is compiled.",
         Toolset::Formats,
         Effects::EVIDENCE | Effects::CARRIES_TARGET_CONTENT,
@@ -47,6 +47,7 @@ pub enum View {
     Images,
     Types,
     Methods,
+    Fields,
     Strings,
 }
 
@@ -55,7 +56,7 @@ pub enum View {
 pub struct MetadataParams {
     /// Absolute path of global-metadata.dat, or of a game's folder to find it in.
     pub path: String,
-    /// What to list: summary (the default), images, types, methods or strings.
+    /// What to list: summary (the default), images, types, methods, fields or strings.
     #[serde(default)]
     pub view: View,
     /// Keep only rows holding this text (any case).
@@ -193,6 +194,28 @@ fn view_rows(ctx: &Ctx<'_>, m: &Metadata<'_>, p: &MetadataParams) -> Result<(Vec
             |v| format!("{} {}", v["type"].as_str().unwrap_or_default(), v["name"].as_str().unwrap_or_default()),
             p,
         ),
+        View::Fields => {
+            // Every field carries the type that declares it (its name is the sheet's citation).
+            let mut declared_by = std::collections::BTreeMap::new();
+            for t in (0..m.type_count()).filter_map(|i| m.type_def(i)) {
+                for j in 0..t.field_count {
+                    declared_by.insert(t.field_start as usize + j as usize, t.full_name());
+                }
+            }
+            rows(
+                ctx,
+                m.field_count() as usize,
+                |i| {
+                    m.field(i).map(|f| {
+                        let mut v = serde_json::to_value(&f).unwrap_or(Value::Null);
+                        v["declared_by"] = json!(declared_by.get(&i));
+                        v
+                    })
+                },
+                |f| f.get("name").and_then(Value::as_str).unwrap_or_default().to_string(),
+                p,
+            )
+        }
         View::Strings => rows(ctx, m.literal_count(), |i| m.literal(i, MAX_LITERAL), |l| l.text.clone(), p),
     }
 }
@@ -258,6 +281,7 @@ fn game_unity_code_names_show(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOu
                 View::Summary | View::Images => "images",
                 View::Types => "types",
                 View::Methods => "methods",
+                View::Fields => "fields",
                 View::Strings => "strings",
             };
             let mut result = json!({
@@ -317,6 +341,24 @@ mod tests {
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         std::fs::write(&p, bytes).unwrap();
         p.display().to_string()
+    }
+
+    /// R2.13: the fields view names every field with the type that declares it — the names a
+    /// mechanics sheet cites, in declaration order.
+    #[test]
+    fn the_fields_view_names_who_declares_what() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(dir.path(), "global-metadata.dat", &sample());
+        let v = call(&engine(), "game_unity_code_names_show", json!({"path": path, "view": "fields"}));
+        let rows = v["result"]["fields"].as_array().unwrap();
+        assert_eq!(rows.len(), 7, "{v}");
+        assert_eq!(rows[0]["name"], "health", "{v}");
+        assert_eq!(rows[0]["declared_by"], "Game.Enemy", "{v}");
+        assert_eq!(rows[2]["name"], "playerName", "{v}");
+        assert_eq!(rows[2]["declared_by"], "Game.Player", "{v}");
+        // The filter keeps rows holding the text, by name or declaring type.
+        let v = call(&engine(), "game_unity_code_names_show", json!({"path": path, "view": "fields", "contains": "armor"}));
+        assert_eq!(v["result"]["fields"].as_array().unwrap().len(), 1, "{v}");
     }
 
     #[test]
