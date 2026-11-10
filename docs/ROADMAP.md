@@ -944,10 +944,11 @@ the states.
       audio clip), and write a manifest.json that names everything with its source, size and any
       reason it was skipped instead of dropping it silently
       — claimed: claude, branch feature/r2.13-assets-extract; PR #17
-- [ ] Crunch texture decode ships as an engines-wrapped converter (unity-texture-codec: our own
-      crn2blocks glue, built against Unity's open-source crunch fork by a one-time build script;
-      the extract and the single export decode crunched formats through it, and say how to build
-      it when it's missing): builders keep rebuilding it from source, hours per game
+- [x] Crunch texture decode ships as an engines-wrapped converter (unitycodec: our own crn2blocks
+      glue, built against Unity's open-source crunch fork by a one-time build script the engine
+      store holds; the extract and the single export decode crunched formats through it, and say
+      the one command that builds it when it's missing): builders keep rebuilding it from source,
+      hours per game
       — claimed: claude, branch feature/r2.13-unity-codec
 - [ ] ETC2 texture decode joins it (a Rust decoder or the converter kit extended): the plain
       ETC2 family is the other format the games actually ship

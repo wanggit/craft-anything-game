@@ -724,6 +724,36 @@ pub struct ExportParams {
 /// The largest picture taken out, in pixels (8192 × 8192).
 const MAX_PIXELS: u64 = 8192 * 8192;
 
+/// A crunched texture decoded through the unity-texture-codec converter (R2.13): the texture's
+/// own bytes are a CRN stream the converter turns back into plain DXT blocks, which the existing
+/// decoder reads. The converter is built once from the kit in the engine store (or found where
+/// Settings → Engines points); a missing converter or a stream that won't decompress is an error
+/// the callers keep as their honest "not decoded here" note.
+fn codec_crunched(settings: &crate::settings::Settings, crn: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
+    if crn.is_empty() {
+        return Err("the texture has no inline data to decompress".into());
+    }
+    let bin = craft_anything_engines::unity_codec::ensure(&settings.engines.tools, &settings.engine_store_dir()).map_err(|e| e.message)?;
+    let work = std::env::temp_dir().join(format!("unitycodec-{}-{:08x}", std::process::id(), crc32_like(crn)));
+    let run = craft_anything_engines::unity_codec::crn_blocks(&bin, crn, &work).map_err(|e| e.message);
+    let _ = std::fs::remove_dir_all(&work);
+    let blocks = run?;
+    // The converter's DXT format (0 = DXT1, 2 = DXT5) is the plain format the blocks are in.
+    let format = match blocks.dxt_format {
+        0 => 10,
+        2 => 12,
+        other => return Err(format!("CRN DXT format {other} isn't decoded here")),
+    };
+    let rgba = unity_texture::decode(format, blocks.width, blocks.height, &blocks.blocks).map_err(|e| e.to_string())?;
+    Ok((blocks.width, blocks.height, rgba))
+}
+
+/// A cheap content tag for a scratch folder name (not a checksum: the codec output is verified by
+/// decoding, not by this).
+fn crc32_like(data: &[u8]) -> u32 {
+    data.iter().fold(0u32, |a, b| a.wrapping_mul(31).wrapping_add(u32::from(*b)))
+}
+
 /// A serialized file to read objects from: a file of its own, or one inside a bundle.
 enum Serialized {
     File {
@@ -838,15 +868,24 @@ fn game_unity_asset_export(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutpu
     if u64::from(t.width) * u64::from(t.height) > MAX_PIXELS {
         return Err(ToolError::new(ErrorCode::OverLimit, format!("{} is {}×{}; the limit is 8192×8192", t.name, t.width, t.height)));
     }
-    let need = unity_texture::mip0_size(t.format, t.width, t.height)
-        .ok_or_else(|| ToolError::unsupported(format!("{} is a {format} texture, which isn't decoded here.", t.name)))? as u64;
-    let pixels = match (&t.inline, &t.stream) {
-        (Some((start, len)), _) => bytes.get(*start..*start + *len).map(<[u8]>::to_vec).unwrap_or_default(),
-        (None, Some(s)) => src.stream(&s.path, s.offset, need.min(u64::from(s.size)))?,
-        (None, None) => Vec::new(),
+    let (width, height, rgba) = match unity_texture::mip0_size(t.format, t.width, t.height) {
+        // A crunched texture keeps a CRN stream in its data: the converter (R2.13) turns it back
+        // into the plain blocks the decoder reads.
+        None => {
+            let crn = t.inline.and_then(|(start, len)| bytes.get(start..start + len)).unwrap_or_default();
+            codec_crunched(&ctx.session.settings, crn).map_err(|why| ToolError::unsupported(format!("{} is a {format} texture: {why}", t.name)))?
+        }
+        Some(need) => {
+            let pixels = match (&t.inline, &t.stream) {
+                (Some((start, len)), _) => bytes.get(*start..*start + *len).map(<[u8]>::to_vec).unwrap_or_default(),
+                (None, Some(s)) => src.stream(&s.path, s.offset, (need as u64).min(u64::from(s.size)))?,
+                (None, None) => Vec::new(),
+            };
+            let rgba = unity_texture::decode(t.format, t.width, t.height, &pixels).map_err(|e| format_err(e, "a Unity texture's pixels"))?;
+            (t.width, t.height, rgba)
+        }
     };
-    let rgba = unity_texture::decode(t.format, t.width, t.height, &pixels).map_err(|e| format_err(e, "a Unity texture's pixels"))?;
-    let png = encode_png(&Image { width: t.width, height: t.height, rgba })?;
+    let png = encode_png(&Image { width, height, rgba })?;
     crate::project::write_atomic(&out, &png)?;
     let sha256 = craft_anything_evidence::sha256_hex(&png);
     let result = json!({
@@ -998,15 +1037,25 @@ fn extract_serialized(ctx: &Ctx<'_>, src: &mut Serialized, label: &str, out: &Pa
             if u64::from(t.width) * u64::from(t.height) > MAX_PIXELS {
                 return Err(format!("{}×{} is over 8192×8192", t.width, t.height));
             }
-            let need = unity_texture::mip0_size(t.format, t.width, t.height).ok_or_else(|| format!("{format} textures aren't decoded here"))? as u64;
-            let pixels = match (&t.inline, &t.stream) {
-                (Some((start, len)), _) => bytes.get(*start..*start + *len).map(<[u8]>::to_vec).unwrap_or_default(),
-                (None, Some(s)) => src.stream(&s.path, s.offset, need.min(u64::from(s.size))).map_err(|e| e.message)?,
-                (None, None) => Vec::new(),
+            let (width, height, rgba) = match unity_texture::mip0_size(t.format, t.width, t.height) {
+                // A crunched texture keeps a CRN stream in its data: the converter (R2.13) turns
+                // it back into the plain blocks the decoder reads.
+                None => {
+                    let crn = t.inline.and_then(|(start, len)| bytes.get(start..start + len)).unwrap_or_default();
+                    codec_crunched(&ctx.session.settings, crn)?
+                }
+                Some(need) => {
+                    let pixels = match (&t.inline, &t.stream) {
+                        (Some((start, len)), _) => bytes.get(*start..*start + *len).map(<[u8]>::to_vec).unwrap_or_default(),
+                        (None, Some(s)) => src.stream(&s.path, s.offset, (need as u64).min(u64::from(s.size))).map_err(|e| e.message)?,
+                        (None, None) => Vec::new(),
+                    };
+                    let rgba = unity_texture::decode(t.format, t.width, t.height, &pixels).map_err(|e| e.to_string())?;
+                    (t.width, t.height, rgba)
+                }
             };
-            let rgba = unity_texture::decode(t.format, t.width, t.height, &pixels).map_err(|e| e.to_string())?;
-            let png = encode_png(&Image { width: t.width, height: t.height, rgba }).map_err(|e| e.message)?;
-            Ok((t.name, format, t.width, t.height, png))
+            let png = encode_png(&Image { width, height, rgba }).map_err(|e| e.message)?;
+            Ok((t.name, format, width, height, png))
         })();
         match decoded {
             Ok((tname, format, width, height, png)) => {
@@ -1233,7 +1282,7 @@ fn game_assets_extract(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, T
         .summary(summary)
         .confidence(Confidence::Observed)
         .coverage(Coverage::complete(state.rows.len() as u64))
-        .limitation(Limitation::new("formats_not_decoded", "Crunched and ETC2 textures, and audio streams, aren't decoded here: they are copied as raw bytes and listed in manifest.json for the tools that will."))
+        .limitation(Limitation::new("formats_not_decoded", "Crunched textures are decoded when the unity-texture-codec converter is built (run the build.sh its first use writes into the engine store); ETC2 textures and audio streams aren't decoded here: they are copied as raw bytes and listed in manifest.json for the tools that will."))
         .location(Location::new("path", out.display().to_string()));
     Ok(ToolOutput::evidence(b.build()?))
 }
@@ -1962,11 +2011,46 @@ mod tests {
         let by_kind = |kind: &str| rows.iter().filter(|x| x["kind"] == kind).count();
         assert_eq!((by_kind("texture"), by_kind("undecoded"), by_kind("audio"), by_kind("raw")), (1, 1, 1, 2), "{manifest}");
         let undecoded = rows.iter().find(|x| x["kind"] == "undecoded").unwrap();
-        assert!(undecoded["reason"].as_str().unwrap().contains("aren't decoded here"), "{undecoded}");
+        assert!(!undecoded["reason"].as_str().unwrap().is_empty(), "{undecoded}");
         for row in rows.iter().filter(|x| x["kind"] == "raw") {
             assert!(out.join(row["file"].as_str().unwrap()).is_file(), "{row}");
         }
         assert!(v["summary"].as_str().unwrap().contains("kept raw (listed, not lost)"), "{v}");
+    }
+
+    /// R2.13: a crunched texture goes through the unity-texture-codec converter (a stand-in here
+    /// that reports red DXT1 blocks) and comes out a real PNG.
+    #[test]
+    #[cfg(unix)]
+    fn a_crunched_texture_goes_through_the_codec_converter() {
+        use craft_anything_testkit::games::{unity_serialized_file, unity_texture2d};
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let codec = dir.path().join("crn2blocks");
+        std::fs::write(
+            &codec,
+            "#!/usr/bin/env python3\nimport sys, pathlib\npathlib.Path(sys.argv[2]).write_bytes(bytes([0, 248, 31, 0, 0, 0, 0, 0]))\nprint('4x4 levels=1 fmt=0 bytesPerBlock=8 bytes=8', file=sys.stderr)\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&codec, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut s = crate::testing::session();
+        s.settings.engines.tools.unitycodec = Some(codec);
+        let e = Engine::new(s);
+        let data = unity_serialized_file("2022.3.62f1", &[(28, unity_texture2d("2022.3.62f1", "Crunched", 4, 4, 200, Some(&[0; 8]), None))]);
+        let path = dir.path().join("shared.assets");
+        std::fs::write(&path, &data).unwrap();
+        let out = dir.path().join("out.png");
+        let v = e
+            .call(
+                "game_unity_asset_export",
+                json!({"path": path.display().to_string(), "path_id": 1, "output": out.display().to_string()}),
+                CallOptions::new(Caller::Mcp),
+            )
+            .unwrap()
+            .to_json();
+        assert_eq!(v["result"]["name"].as_str(), Some("Crunched"), "{v}");
+        let png = crate::tools::web_common::decode_png(&std::fs::read(&out).unwrap()).unwrap();
+        assert!(png.rgba.as_chunks::<4>().0.iter().all(|p| *p == [255, 0, 0, 255]), "the stand-in's red DXT1 blocks decode red");
     }
 
     /// R2.13: a compressed .unityweb stream is decompressed first and its assets extracted too.
