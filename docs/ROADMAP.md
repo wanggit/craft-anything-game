@@ -928,14 +928,15 @@ tools instead of builder-built scripts, stage the brief so analysis cannot eat t
 survive provider outages. One pass means: the study produces assets + mechanics + state
 references, the builder works from tools without writing analysis code, and the check compares
 the states.
-- [ ] The study photographs the game's play states and the check compares them: after the focus
+- [x] The study photographs the game's play states and the check compares them: after the focus
       capture, a best-effort auto-player clicks into the game (DOM buttons, then canvas clicks at
       the common button spots) and photographs each materially new state into
       capture/focus/play-states/ with states.json (file, the action that reached it); no change
       for two attempts ends it, and the step says honestly what it reached. The web check replays
       the same actions against the build, pairs each build state with the closest recorded one
       (picture likeness), and claims hold the build to every recorded state having a match — a
-      boot-screen 100% no longer carries a game
+      boot-screen 100% no longer carries a game (claims at a 50% floor — the finish bar waits
+      for measurement)
       — claimed: claude, branch feature/r2.13-play-states
 - [ ] The asset pipeline is tools, not builder scripts (extends R3.9): crunch/ETC2/DXT texture
       decode and export, sprite-atlas rect resolution (the missing external SpriteAtlas captured

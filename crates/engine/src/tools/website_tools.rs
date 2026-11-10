@@ -70,6 +70,17 @@ pub fn specs() -> Vec<ToolSpec> {
             web_page_states_capture,
         ),
         spec(
+            "web_game_states_capture",
+            "Photograph a game's play states",
+            "Drive the open game the way a player would and photograph what it shows: the view it starts from, then up to max_states clicks (buttons like PLAY first, then taps at the canvas's common button spots), a screenshot kept only after each materially new view. Writes state-<n>.png and states.json (the action that reached each state) into a new folder. With replay, click exactly the recorded actions of an earlier states.json in order, so a check walks the build through what the study did. Clicking runs the game's own code, so it needs your approval.",
+            "Tap through the game and save what each screen looks like.",
+            Toolset::Browser,
+            Effects::EVIDENCE.union(Effects::WRITES_FILESYSTEM).union(Effects::EXECUTES_FOREIGN_CODE).union(Effects::ACCESSES_NETWORK),
+            Requires::AnyEngine(&["camoufox", "chromium"]),
+            schema_of::<GameStatesParams>,
+            web_game_states_capture,
+        ),
+        spec(
             "web_site_close",
             "Close the website",
             "Close the private browser started by web_site_open and delete its temporary profile.",
@@ -481,6 +492,207 @@ fn web_page_states_capture(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutpu
     .authority(Authority::OurRun)
     .limitation(Limitation::new("first_controls", "Only the first controls found are opened, one at a time; menus inside menus and hover-only menus are not."))
     .coverage(Coverage::complete(states.len() as u64))
+    .location(Location::new("url", start))
+    .build()?;
+    Ok(ToolOutput::evidence(ev))
+}
+
+// ---------------------------------------------------------------------------------------------
+// web_game_states_capture
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GameStatesParams {
+    /// Absolute path of a folder that does not exist yet; the play states are written there.
+    pub output_directory: String,
+    /// Most states to photograph (1..=8, default 5).
+    #[serde(default = "d_game_states")]
+    pub max_states: usize,
+    /// Page width in CSS pixels (320..=3840, default 1440).
+    #[serde(default = "d_state_width")]
+    pub width: u32,
+    /// Click exactly these page coordinates in order — the `action` entries of an earlier
+    /// states.json — instead of finding targets (a check replays what the study did).
+    #[serde(default)]
+    pub replay: Vec<Value>,
+    #[serde(default = "d_timeout")]
+    pub timeout_secs: u64,
+}
+
+fn d_game_states() -> usize {
+    5
+}
+
+/// Click candidates for a game: enter-ish DOM buttons first, then other visible buttons, then
+/// taps at the canvas's common button spots. `__MAX__` is replaced.
+const FIND_GAME_CLICKS_JS: &str = r#"(() => {
+  const cap = (s, n) => String(s || '').replace(/\s+/g, ' ').trim().slice(0, n);
+  const shown = el => { const r = el.getBoundingClientRect(); if (r.width < 1 || r.height < 1) return false; const s = getComputedStyle(el); return s.visibility !== 'hidden' && s.display !== 'none'; };
+  const enter = [], other = [];
+  for (const el of document.querySelectorAll('button, [role="button"], a, input[type="button"], input[type="submit"]')) {
+    if (!shown(el)) continue;
+    const label = cap(el.innerText || el.value || el.getAttribute('aria-label') || el.getAttribute('title') || '', 40);
+    const r = el.getBoundingClientRect();
+    const spot = {kind: 'dom', label, x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2)};
+    (/play|start|continue|begin|tap|enter|go|开始|进入|继续|玩/.test(label.toLowerCase()) ? enter : other).push(spot);
+  }
+  const taps = [];
+  const c = document.querySelector('canvas');
+  if (c) {
+    const r = c.getBoundingClientRect();
+    for (const f of [[0.5, 0.82], [0.5, 0.5], [0.25, 0.82], [0.75, 0.82]]) {
+      taps.push({kind: 'canvas', label: 'canvas tap', x: Math.round(r.left + r.width * f[0]), y: Math.round(r.top + r.height * f[1])});
+    }
+  }
+  return enter.concat(other).concat(taps).slice(0, __MAX__);
+})()"#;
+
+/// Click at page coordinates the way a player would: the full pointer/mouse sequence on the
+/// topmost element there (a game's canvas listens for these, not for element.click()).
+const CLICK_AT_JS: &str = r#"(() => {
+  const x = __X__, y = __Y__;
+  const el = document.elementFromPoint(x, y) || document.body;
+  const init = {clientX: x, clientY: y, bubbles: true, cancelable: true, view: window, button: 0, buttons: 1};
+  for (const type of ['pointerover', 'pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+    el.dispatchEvent(type.startsWith('pointer') ? new PointerEvent(type, Object.assign({pointerId: 1, isPrimary: true}, init)) : new MouseEvent(type, init));
+  }
+  return true;
+})()"#;
+
+/// How much of two pictures differs (0.0..=1.0): the share of pixels with any channel off by
+/// more than 8. None when either cannot be decoded or their sizes differ.
+pub fn picture_change(a: &[u8], b: &[u8]) -> Option<f64> {
+    let (a, b) = (web_common::decode_png(a).ok()?, web_common::decode_png(b).ok()?);
+    if a.width != b.width || a.height != b.height || a.width == 0 {
+        return None;
+    }
+    let n = (a.width as usize).saturating_mul(a.height as usize);
+    if n == 0 || a.rgba.len() != n * 4 || b.rgba.len() != n * 4 {
+        return None;
+    }
+    let changed = a.rgba.chunks(4).zip(b.rgba.chunks(4)).filter(|(x, y)| x.iter().zip(y.iter()).any(|(p, q)| p.abs_diff(*q) > 8)).count();
+    Some(changed as f64 / n as f64)
+}
+
+/// One photographed play state's row in states.json.
+fn save_play_state(out: &Path, n: usize, bytes: &[u8], action: Value, changed: bool, states: &mut Vec<Value>) -> Result<(), ToolError> {
+    let name = format!("state-{n}.png");
+    write_new_file(out, std::slice::from_ref(&name), bytes).map_err(ToolError::invalid)?;
+    states.push(json!({"file": name, "sha256": sha256_hex(bytes), "action": action, "changed": changed}));
+    Ok(())
+}
+
+/// Photograph a game's play states (R2.13): the view it starts from, then a best-effort click
+/// into it (DOM buttons first, then taps at the canvas's common button spots) after every
+/// materially new view. Two clicks that change nothing end it; `replay` clicks exactly the
+/// recorded coordinates instead, so a check walks the build through what the study did.
+fn web_game_states_capture(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, ToolError> {
+    let p: GameStatesParams = parse_params(params)?;
+    if !(1..=8).contains(&p.max_states) {
+        return Err(ToolError::invalid("max_states must be 1..=8"));
+    }
+    if !(320..=3840).contains(&p.width) {
+        return Err(ToolError::invalid("width must be 320..=3840"));
+    }
+    let mut replay = Vec::new();
+    for a in &p.replay {
+        match (a.get("x").and_then(Value::as_u64), a.get("y").and_then(Value::as_u64)) {
+            (Some(x), Some(y)) => replay.push((x.min(u32::MAX as u64) as u32, y.min(u32::MAX as u64) as u32)),
+            _ => {
+                return Err(ToolError::invalid("replay entries need x and y")
+                    .with_remediation("Pass the action entries of an earlier states.json ({\"kind\": \"click\", \"x\": n, \"y\": n, …}) as they are."));
+            }
+        }
+    }
+    let walking_through = !p.replay.is_empty();
+    let dl = deadline(ctx, p.timeout_secs.max(30))?;
+    let site = open_site(ctx, &dl)?;
+    let out = create_absent_dir(&p.output_directory)?;
+    let mut conn = site.backend.page(&dl)?;
+    let page = conn.as_mut();
+    let r = (|| -> Result<(String, Vec<Value>, usize, usize), ToolError> {
+        page.set_viewport(p.width, 900, &dl)?;
+        page.settle(800, &dl)?;
+        let start = eval(page, "location.href", &dl)?.as_str().unwrap_or_default().to_string();
+        let mut states = Vec::new();
+        let mut n = 0usize;
+        let shot = page.screenshot(None, &dl)?;
+        n += 1;
+        save_play_state(&out, n, &shot, json!({"kind": "load"}), true, &mut states)?;
+        let mut last = shot;
+        let clicks: Vec<(u32, u32, String)> = if walking_through {
+            replay.iter().map(|(x, y)| (*x, *y, "replayed click".to_string())).collect()
+        } else {
+            let found = eval(page, &FIND_GAME_CLICKS_JS.replace("__MAX__", &p.max_states.to_string()), &dl)?;
+            found
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|c| {
+                    let (x, y) = (c.get("x").and_then(Value::as_u64)?, c.get("y").and_then(Value::as_u64)?);
+                    let label = c.get("label").and_then(Value::as_str).unwrap_or("a tap").to_string();
+                    Some((x.min(u32::MAX as u64) as u32, y.min(u32::MAX as u64) as u32, label))
+                })
+                .collect()
+        };
+        let mut misses = 0usize;
+        let mut tried = 0usize;
+        for (x, y, label) in clicks {
+            if n >= p.max_states || dl.expired() || (!walking_through && misses >= 2) {
+                break;
+            }
+            tried += 1;
+            ctx.report(Some(n as f32 / p.max_states as f32), format!("Clicking {label}…"));
+            let _ = eval(page, &CLICK_AT_JS.replace("__X__", &x.to_string()).replace("__Y__", &y.to_string()), &dl);
+            page.settle(1500, &dl)?;
+            let shot = page.screenshot(None, &dl)?;
+            let change = picture_change(&last, &shot);
+            let changed = change.unwrap_or(1.0) > 0.005;
+            let action = json!({"kind": "click", "x": x, "y": y, "target": label, "change": change});
+            if changed || walking_through {
+                // A replay keeps every step's picture, so state-i pairs with the study's state-i
+                // even when a click on the build changes less than it did on the original.
+                n += 1;
+                save_play_state(&out, n, &shot, action, changed, &mut states)?;
+                last = shot;
+                misses = 0;
+            } else {
+                states.push(json!({"action": action, "changed": false}));
+                misses += 1;
+            }
+        }
+        Ok((start, states, n, tried))
+    })();
+    page.finish(&dl);
+    let (start, states, pictured, tried) = r?;
+    let json_bytes = serde_json::to_vec_pretty(&json!({"url": start, "width": p.width, "walked_through": walking_through, "states": states}))
+        .map_err(|e| ToolError::internal(e.to_string()))?;
+    write_new_file(&out, &["states.json".into()], &json_bytes).map_err(ToolError::invalid)?;
+    let shown = shown_url(&start);
+    let summary = if pictured <= 1 {
+        format!("Photographed {shown} as it starts; every click left it looking the same ({} tried), so no deeper play state was reached.", tried)
+    } else {
+        format!(
+            "Photographed {pictured} play states of {shown} with {tried} click(s); {} in {}.",
+            if walking_through { "the recorded clicks replayed" } else { "each after a materially new view" },
+            out.display()
+        )
+    };
+    let ev = EvidenceBuilder::new(
+        "web_game_states_capture",
+        Subject { kind: "website".into(), sha256: None, name: Some(shown.clone()) },
+        site.env(ctx.session.clean_room()),
+    )
+    .params(json!({"max_states": p.max_states, "width": p.width, "walked_through": walking_through}))
+    .result(json!({"url": start, "pictured": pictured, "tried": tried, "states": states, "folder": out.display().to_string()}))
+    .summary(summary)
+    .confidence(Confidence::Observed)
+    .authority(Authority::OurRun)
+    .limitation(Limitation::new(
+        "best_effort_taps",
+        "A game is entered by tapping buttons or the canvas's common button spots; states a player reaches by dragging, waiting or playing well may not appear.",
+    ))
+    .coverage(Coverage::complete(pictured as u64))
     .location(Location::new("url", start))
     .build()?;
     Ok(ToolOutput::evidence(ev))
@@ -1667,6 +1879,22 @@ fn web_site_close(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, ToolEr
 mod tests {
     use super::*;
 
+    /// R2.13: how much two pictures differ is the share of changed pixels, and pictures of
+    /// different sizes (or not pictures) say so instead of guessing.
+    #[test]
+    fn picture_change_counts_the_pixels_that_moved() {
+        let a = web_common::Image { width: 4, height: 4, rgba: vec![128; 4 * 4 * 4] };
+        let mut shifted = a.rgba.clone();
+        shifted[0] = 200; // one pixel off by more than 8
+        let b = web_common::Image { width: 4, height: 4, rgba: shifted };
+        let (pa, pb) = (web_common::encode_png(&a).unwrap(), web_common::encode_png(&b).unwrap());
+        assert_eq!(picture_change(&pa, &pb), Some(1.0 / 16.0));
+        assert_eq!(picture_change(&pa, &pa), Some(0.0), "the same picture doesn't change");
+        let wide = web_common::encode_png(&web_common::Image { width: 8, height: 4, rgba: vec![128; 8 * 4 * 4] }).unwrap();
+        assert_eq!(picture_change(&pa, &wide), None, "different sizes: unknown, not 'changed'");
+        assert_eq!(picture_change(b"not a png", &pa), None);
+    }
+
     /// R2.12: one body as the helper reports it.
     fn body(url: &str, kind: &str, bytes: u64, sha: &str) -> Value {
         json!({"url": url, "type": kind, "status": 200, "frame": "https://a.test/", "length": bytes,
@@ -2193,6 +2421,40 @@ for (const t of tabs) t.onclick = () => tabs.forEach(o => o.setAttribute('aria-s
             assert_eq!(rows["states"][0]["label"], "Two", "capture {n}: {rows}");
             assert_eq!(rows["states"][0]["changed"], json!(["tab selected"]), "capture {n}: {rows}");
         }
+        let _ = e.call("web_site_close", json!({}), cli());
+    }
+
+    /// R2.13: the play-states walk taps into a game, keeps only the materially new screens, and a
+    /// replay of the recorded actions reaches the same screens again. Live (`--ignored`).
+    #[test]
+    #[ignore]
+    fn game_states_tap_through_and_a_replay_reaches_the_same_screens() {
+        let e = serve_and_open(
+            r#"<!doctype html><html><body style="margin:0;background:#7060ff">
+<div id="menu" style="text-align:center;padding-top:200px"><button id="play" style="font-size:48px">PLAY</button></div>
+<div id="battle" style="display:none;width:100vw;height:100vh;background:#00b060"></div>
+<script>
+document.getElementById('play').onclick = () => { document.getElementById('menu').style.display = 'none'; document.getElementById('battle').style.display = 'block'; };
+document.getElementById('battle').onclick = () => { document.getElementById('battle').style.background = '#b00020'; };
+</script></body></html>"#,
+        );
+        let cli = || crate::CallOptions::new(crate::Caller::Cli).with_consent(crate::Consent::Granted);
+        let dir = tempfile::tempdir().unwrap();
+        let walk = dir.path().join("walk");
+        e.call("web_game_states_capture", json!({"output_directory": walk.display().to_string(), "max_states": 4}), cli()).unwrap();
+        let rows: Value = serde_json::from_str(&std::fs::read_to_string(walk.join("states.json")).unwrap()).unwrap();
+        let files: Vec<&str> = rows["states"].as_array().unwrap().iter().filter_map(|s| s["file"].as_str()).collect();
+        assert!(files.len() >= 2, "the start view and the screen PLAY reaches: {rows}");
+        let clicks: Vec<Value> =
+            rows["states"].as_array().unwrap().iter().filter_map(|s| (s["action"]["kind"] == "click").then(|| s["action"].clone())).collect();
+        assert!(!clicks.is_empty(), "PLAY was clicked: {rows}");
+        // Replaying the recorded actions walks the same screens again, one picture per step.
+        let replay = dir.path().join("replay");
+        e.call("web_game_states_capture", json!({"output_directory": replay.display().to_string(), "max_states": 4, "replay": clicks}), cli()).unwrap();
+        let again: Value = serde_json::from_str(&std::fs::read_to_string(replay.join("states.json")).unwrap()).unwrap();
+        let again_files = again["states"].as_array().unwrap().iter().filter(|s| s.get("file").is_some()).count();
+        assert_eq!(again_files, rows["states"].as_array().unwrap().iter().filter(|s| s.get("file").is_some()).count(), "the replay keeps every step: {again}");
+        assert_eq!(again["walked_through"], json!(true));
         let _ = e.call("web_site_close", json!({}), cli());
     }
 

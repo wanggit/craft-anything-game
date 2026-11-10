@@ -34,6 +34,10 @@ pub const FOCUS_DIR: &str = "focus";
 /// The focused part's own saved files, inside `capture/<focus>/` (R2.12).
 pub const RESOURCES_DIR: &str = "resources";
 
+/// The focused game's photographed play states, inside `capture/<focus>/` (R2.13): the screens a
+/// player reaches, which the check replays against the build.
+pub const PLAY_STATES_DIR: &str = "play-states";
+
 /// The embedded view the focus points at in a capture's `embeds` (R2.11): the one with the
 /// focus's element id, else the biggest the capture found.
 pub fn pick_focus_embed<'a>(capture: &'a Value, focus: &Focus) -> Option<&'a Value> {
@@ -97,6 +101,19 @@ fn focus_resources_brief(focus: &Focus, ws: &Workspace) -> Option<String> {
          - Pictures, sounds, fonts and data: copy every one the game uses into app/ and use them as they are — never redraw, regenerate or substitute a file that is already here. Its lists and tables (levels, items, prices, timings) go in unchanged.\n\
          - Code: the game's own code is what you write the game from. Read it first (js_sources_restore and js_app_map for bundles; data files open as they are). Where its logic is readable (scripts, project data), adapt it into app/ keeping its meaning — the same formulas, constants, timings and states. Where it is compiled (a wasm build, engine data), recover what it does before you write a line: formats_wasm_module_show reads a wasm module; game_unity_list and game_unity_asset_export read Unity data and bundles (decompress .unityweb streams first, keeping the decompressor inside the project folder); game_unity_code_names_show names a Unity build's classes, methods and fields from its metadata. Put every constant, formula and rule you recover into app/MECHANICS.md with where it came from (a file, a name or address, or an evidence id) or mark it \"estimated\", then implement the game from that sheet.\n\
          - Never run the game's own compiled runtime (a Unity or Unreal build, its engine data) as the game: the game is your own implementation. Open-source libraries it ships — engines like PlayCanvas, codecs like draco, physics, loaders — are yours to use as they are, copied into app/ unchanged: open-source libraries are never rebuilt. If something can't be read or recovered, record it with core_unknown_add and say what you did instead in your summary."
+    ))
+}
+
+/// What the builder is told when the focused game's play states were photographed (R2.13):
+/// these are the screens the game really shows, and the check replays the same actions against
+/// the build — matching the first picture alone is no longer enough.
+fn play_states_brief(focus: &Focus, ws: &Workspace) -> Option<String> {
+    if !ws.capture_dir().join(FOCUS_DIR).join(PLAY_STATES_DIR).join("states.json").is_file() {
+        return None;
+    }
+    Some(format!(
+        "The {}'s play states were photographed by playing it (capture/{}/{}/: state-<n>.png, each reached by the action states.json records). Open every one with the Read tool: they are the screens the game really shows — the start view and what tapping into it reaches — and the checks replay the same actions against your build and compare each screen. Match every one, not just the first picture.",
+        focus.what, FOCUS_DIR, PLAY_STATES_DIR
     ))
 }
 
@@ -249,6 +266,7 @@ impl TargetKind for WebsiteKind {
         if let Some(focus) = &cx.ws.manifest.focus {
             let mut out = vec![focus_brief(focus)];
             out.extend(focus_resources_brief(focus, cx.ws));
+            out.extend(play_states_brief(focus, cx.ws));
             return out;
         }
         let mut out = Vec::new();
@@ -275,6 +293,7 @@ impl TargetKind for WebsiteKind {
         let Some(focus) = &cx.ws.manifest.focus else { return Vec::new() };
         let mut out = vec![focus_brief(focus)];
         out.extend(focus_resources_brief(focus, cx.ws));
+        out.extend(play_states_brief(focus, cx.ws));
         out
     }
 
@@ -904,6 +923,91 @@ fn app_file_hashes(app: &Path, sizes: &std::collections::BTreeSet<u64>) -> std::
     out
 }
 
+/// The floor for a play state "looking alike": it is the same screen, not the finish bar (which
+/// waits for measured true-rebuild attempts — R2.12's decision).
+const PLAY_STATE_FLOOR: f64 = 50.0;
+
+/// Claims from pairing the study's recorded play states with the build's replayed ones (R2.13):
+/// every recorded screen must be reached in the build and look alike. `(label, likeness)` per
+/// recorded state; `None` likeness = the build never showed it (or it couldn't be compared).
+pub fn play_state_claims(states: &[(String, Option<f64>)]) -> Vec<Claim> {
+    states
+        .iter()
+        .enumerate()
+        .map(|(i, (label, likeness))| {
+            let title = format!("Play state {} ({label}) is reached and looks alike", i + 1);
+            match likeness {
+                Some(s) if *s >= PLAY_STATE_FLOOR => Claim::new(title, true, ""),
+                Some(s) => Claim::new(title, false, format!("only {s:.0}% alike")),
+                None => Claim::new(title, false, "the build never showed this state"),
+            }
+        })
+        .collect()
+}
+
+/// Replay the study's recorded play-state actions against the build, photograph what it reaches,
+/// and pair each screen with the recorded one (R2.13). A replay that can't run is an unknown
+/// (the build is not blamed for a check that couldn't look).
+fn play_states_note(cx: &CheckCx, ws: &Workspace, out: &Path, unknowns: &mut Vec<String>, claims: &mut Vec<Claim>) -> Result<Option<String>, ToolError> {
+    let dir = ws.capture_dir().join(FOCUS_DIR).join(PLAY_STATES_DIR);
+    let Some(orig) = read_json(&dir.join("states.json")) else { return Ok(None) };
+    let all = orig.get("states").and_then(Value::as_array).into_iter().flatten().collect::<Vec<_>>();
+    let rows: Vec<&Value> = all.iter().copied().filter(|r| r.get("file").and_then(Value::as_str).is_some()).collect();
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    let actions: Vec<Value> = all
+        .iter()
+        .filter_map(|r| {
+            let a = r.get("action")?;
+            (a.get("kind").and_then(Value::as_str) == Some("click")).then(|| a.clone())
+        })
+        .collect();
+    let width = orig.get("width").and_then(Value::as_u64).unwrap_or(1440).clamp(320, 3840) as u32;
+    let built = out.join(PLAY_STATES_DIR);
+    let replayed = cx.call(
+        "web_game_states_capture",
+        json!({"output_directory": built.display().to_string(), "width": width, "max_states": rows.len().min(8), "replay": actions}),
+    );
+    let ours = read_json(&built.join("states.json"));
+    let built_rows: Vec<&Value> = ours
+        .as_ref()
+        .and_then(|o| o.get("states"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|r| r.get("file").and_then(Value::as_str).is_some())
+        .collect();
+    if built_rows.is_empty() {
+        let why = replayed.err().map(|e| e.message).unwrap_or_else(|| "no state was reached".into());
+        unknowns.push(format!("the play states couldn't be replayed against the build ({why})"));
+        return Ok(Some("play states: not compared this round".to_string()));
+    }
+    let mut pairs = Vec::new();
+    let mut parts = Vec::new();
+    for (i, row) in rows.iter().enumerate() {
+        let label =
+            row.get("action").and_then(|a| a.get("target")).and_then(Value::as_str).unwrap_or(if i == 0 { "the start view" } else { "a tap" }).to_string();
+        let likeness = match (row.get("file").and_then(Value::as_str), built_rows.get(i).and_then(|b| b.get("file")).and_then(Value::as_str)) {
+            (Some(a_file), Some(b_file)) => match picture_likeness(cx, &dir.join(a_file), &built.join(b_file))? {
+                Some((s, ..)) => Some(s),
+                None => {
+                    unknowns.push(format!("play state {} ({label}) couldn't be compared", i + 1));
+                    None
+                }
+            },
+            _ => None,
+        };
+        if let Some(s) = likeness {
+            parts.push(format!("{}: {:.0}%", i + 1, s));
+        }
+        pairs.push((label, likeness));
+    }
+    claims.extend(play_state_claims(&pairs));
+    let reached = pairs.iter().filter(|(_, l)| l.is_some()).count();
+    Ok(Some(format!("play states: {reached} of {} recorded screens reached and compared ({}).", pairs.len(), parts.join(", "))))
+}
+
 /// "the game area" → "The game area", for a claim's title.
 fn capitalized(what: &str) -> String {
     let mut c = what.chars();
@@ -1079,6 +1183,11 @@ impl Check for WebVisualCheck {
             for dir in state_dirs(&ws.capture_dir()) {
                 notes.extend(states_note(cx, &base, &out, &dir, &mut unknowns, &mut claims)?);
             }
+        }
+        // R2.13: the recorded play states are the game, not just the first paint: replay the
+        // study's clicks against the build and compare each screen it reached.
+        if let Some(note) = play_states_note(cx, ws, &out, &mut unknowns, &mut claims)? {
+            notes.push(note);
         }
         let failed: Vec<String> = claims.iter().filter(|c| !c.passed).map(|c| format!("{} ({})", c.title, c.detail)).collect();
         if !failed.is_empty() {
@@ -1317,6 +1426,29 @@ mod tests {
         )
         .unwrap();
         assert!(originals_claims(&ws, false).is_empty(), "only scripts: nothing to claim about");
+    }
+
+    /// R2.13: the play-states brief is said only when the study photographed any, and each
+    /// recorded screen becomes a claim that must be reached and look alike (the floor is the
+    /// same screen, not the finish bar).
+    #[test]
+    fn play_states_are_a_brief_and_a_claim_each() {
+        let d = tempfile::tempdir().unwrap();
+        let mut ws = Workspace::create(d.path(), "Game", "Clone the game, only the game area", TargetRef::Website { url: "https://x/".into() }).unwrap();
+        ws.manifest.focus = Some(Focus { what: "the game area".into(), element_id: None });
+        let focus = Focus { what: "the game area".into(), element_id: None };
+        assert!(play_states_brief(&focus, &ws).is_none(), "nothing photographed: nothing said");
+        let dir = ws.capture_dir().join(FOCUS_DIR).join(PLAY_STATES_DIR);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("states.json"), b"{}").unwrap();
+        let text = play_states_brief(&focus, &ws).unwrap();
+        for said in ["capture/focus/play-states/", "state-<n>.png", "replay the same actions against your build"] {
+            assert!(text.contains(said), "{said} missing from {text}");
+        }
+        let claims = play_state_claims(&[("the start view".into(), Some(92.0)), ("a tap".into(), Some(30.0)), ("another tap".into(), None)]);
+        assert!(claims[0].passed && claims[0].detail.is_empty(), "{:?}", claims[0]);
+        assert!(!claims[1].passed && claims[1].detail.contains("30% alike"), "{:?}", claims[1]);
+        assert!(!claims[2].passed && claims[2].detail.contains("never showed"), "{:?}", claims[2]);
     }
 
     /// R2.11: the refine note names the part's own capture for a focused rebuild (one pair to
