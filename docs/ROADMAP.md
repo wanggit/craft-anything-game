@@ -961,7 +961,7 @@ the states.
       instruction list, its constants (i32/i64/f32/f64 with where they sit) and its calls
       resolved to function names, picked by name — the workflow that had builders writing their
       own wasm-fn.py against 87k-function modules
-      — claimed: claude, branch feature/r2.13-wasm-function
+      — claimed: claude, branch feature/r2.13-wasm-function; PR #20
 - [ ] `game_config_dump` reads a MonoBehaviour's serialized fields by its metadata type layout
       (the values a mechanics sheet cites), and the MECHANICS.md contract check (values cite
       functions or addresses, estimates labelled) extends to web games
