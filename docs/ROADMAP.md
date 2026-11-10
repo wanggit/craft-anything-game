@@ -984,7 +984,7 @@ the states.
 - [x] Run resilience: provider API errors (400s among them) and dropped connections retry with
       backoff and resume the agent session on their own (two attempts gave up mid-outage today);
       a resume prompt travels as an argument (stdin came out empty and the turn ran with no
-      prompt at all) — claimed: claude, branch feature/r2.13-resilience
+      prompt at all) — claimed: claude, branch feature/r2.13-resilience; PR #23
 
 ---
 
