@@ -938,10 +938,16 @@ the states.
       boot-screen 100% no longer carries a game (claims at a 50% floor — the finish bar waits
       for measurement)
       — claimed: claude, branch feature/r2.13-play-states; PR #16
-- [ ] The asset pipeline is tools, not builder scripts (extends R3.9): crunch/ETC2/DXT texture
-      decode and export, sprite-atlas rect resolution (the missing external SpriteAtlas captured
-      with the game), audio out — one `game_assets_extract` fills app/Original/ with a source
-      manifest
+- [ ] `game_assets_extract` orchestrates what the tools can decode: decompress .unityweb/zip
+      streams, export every decodable texture (DXT family, uncompressed) as PNG, copy what it
+      cannot decode as it is, and write a source manifest that lists everything skipped (a
+      crunched texture, an audio clip) by name, class and size instead of dropping it silently
+      — claimed: claude, branch feature/r2.13-assets-extract
+- [ ] Crunch and ETC2 texture decode ship with the extract (an engines-wrapped converter
+      installed once, or a Rust decoder): builders keep rebuilding them from source, hours per
+      game (R3.9's crunched-texture line is the same gap)
+- [ ] Sprite-atlas rect resolution (the missing external SpriteAtlas captured with the game) and
+      audio out (R3.9's sound line) complete the set
 - [ ] wasm/IL2CPP recovery is tools: `game_il2cpp_map` (metadata names ↔ wasm functions),
       `game_wasm_decompile` (per-function disassembly and constants), `game_config_dump`
       (serialized config fields), and the MECHANICS.md contract check (values cite functions or
