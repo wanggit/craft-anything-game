@@ -5,7 +5,7 @@
 use super::native_common::{page, spec};
 use super::static_input::{self, Input, builder, format_err};
 use crate::tool::{Ctx, Effects, Requires, ToolOutput, ToolSpec, Toolset, parse_params, schema_of};
-use craft_anything_evidence::{Authority, Confidence, Coverage, Limitation, Location, Subject, ToolError, sha256_hex};
+use craft_anything_evidence::{Authority, Confidence, Coverage, ErrorCode, Limitation, Location, Subject, ToolError, sha256_hex};
 use craft_anything_formats::{evm, go, wasm};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -35,6 +35,17 @@ pub fn specs() -> Vec<ToolSpec> {
             Requires::Nothing,
             schema_of::<WasmParams>,
             formats_wasm_module_show,
+        ),
+        spec(
+            "formats_wasm_function_show",
+            "One WebAssembly function",
+            "Read one function of a WebAssembly module instruction by instruction, picked by name (a substring of the name section's names, or `func <index>`): the operators in WAT vocabulary with their arguments (`i32.add`, `call`), every constant with its position (`i32.const 7`, `f32.const 0.5`), and every call with its target resolved to a name — the reading a mechanics sheet cites. Built-in parser; up to `op_limit` operators are listed, while constants and calls are collected in full.",
+            "Show one function's instructions, constants and calls.",
+            Toolset::Formats,
+            e,
+            Requires::Nothing,
+            schema_of::<WasmFunctionParams>,
+            formats_wasm_function_show,
         ),
         spec(
             "formats_evm_interface_show",
@@ -120,6 +131,28 @@ pub struct WasmParams {
     /// Up to 16 absolute paths of JavaScript glue files to scan for .wasm references and import names.
     #[serde(default)]
     pub js_glue_files: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WasmFunctionParams {
+    /// Absolute path of the .wasm file.
+    pub path: String,
+    /// The function to read: a substring of the name section's names (case-insensitive), or `func <index>`.
+    pub function: String,
+    /// Most functions to read when the name matches several (1..=20, default 5).
+    #[serde(default = "d_wasm_fn_matches")]
+    pub match_limit: usize,
+    /// Most operators listed per function (1..=20000, default 600); constants and calls are collected in full regardless.
+    #[serde(default = "d_wasm_fn_ops")]
+    pub op_limit: usize,
+}
+
+fn d_wasm_fn_matches() -> usize {
+    5
+}
+fn d_wasm_fn_ops() -> usize {
+    600
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
@@ -354,6 +387,72 @@ fn formats_wasm_module_show(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutp
     Ok(ToolOutput::evidence(ev))
 }
 
+/// One function's instructions, constants and calls (R2.13): the reading a mechanics sheet
+/// cites, picked by name. Builders wrote their own disassembly scripts for want of this.
+fn formats_wasm_function_show(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, ToolError> {
+    let p: WasmFunctionParams = parse_params(params)?;
+    if !(1..=20).contains(&p.match_limit) {
+        return Err(ToolError::invalid("match_limit must be 1..=20"));
+    }
+    if !(1..=20_000).contains(&p.op_limit) {
+        return Err(ToolError::invalid("op_limit must be 1..=20000"));
+    }
+    let input = static_input::load(ctx, Some(&p.path), wasm::MAX_INPUT as u64)?;
+    ctx.report(None, format!("Reading functions of {}", input.name));
+    let r = wasm::inspect(&input.bytes).map_err(|e| format_err(e, "a WebAssembly module"))?;
+    let want = p.function.trim();
+    let folded = want.to_lowercase();
+    let by_index = want.strip_prefix("func ").and_then(|n| n.trim().parse::<u32>().ok());
+    let picked: Vec<&wasm::WasmFunction> = r
+        .functions
+        .iter()
+        .filter(|f| match by_index {
+            Some(i) => f.index == i,
+            None => f.name.as_deref().is_some_and(|n| n.to_lowercase().contains(&folded)),
+        })
+        .take(p.match_limit)
+        .collect();
+    if picked.is_empty() {
+        return Err(ToolError::new(ErrorCode::NotFound, format!("no function matches {want:?}"))
+            .with_remediation("formats_wasm_module_show lists the module's function names."));
+    }
+    let mut rows = Vec::new();
+    for f in &picked {
+        ctx.cancel.check()?;
+        let t = wasm::function_text(&input.bytes, f.index, p.op_limit).map_err(|e| format_err(e, "a WebAssembly function"))?;
+        rows.push(json!({
+            "index": f.index,
+            "name": f.name,
+            "signature": f.signature,
+            "locals": f.locals,
+            "ops": t.ops,
+            "ops_truncated": t.truncated,
+            "constants": t.constants.iter().map(|(at, c)| json!({"op": at, "value": c})).collect::<Vec<_>>(),
+            "calls": t.calls.iter().map(|(at, c)| json!({"op": at, "target": c})).collect::<Vec<_>>(),
+        }));
+    }
+    let constants: usize = rows.iter().filter_map(|x| x["constants"].as_array().map(Vec::len)).sum();
+    let calls: usize = rows.iter().filter_map(|x| x["calls"].as_array().map(Vec::len)).sum();
+    let shown = rows.iter().filter_map(|x| x["ops"].as_array().map(Vec::len)).sum::<usize>();
+    let summary =
+        format!("Read {} function(s) of {}: {shown} instruction(s) listed, {constants} constant(s) and {calls} call(s) collected.", rows.len(), input.name);
+    let ev = builder(
+        ctx,
+        "formats_wasm_function_show",
+        input.subject.clone(),
+        json!({"path": input.path, "function": p.function, "match_limit": p.match_limit, "op_limit": p.op_limit}),
+    )
+    .result(json!({"functions": rows}))
+    .summary(summary)
+    .confidence(Confidence::Observed)
+    .authority(Authority::OriginalFiles)
+    .coverage(Coverage::complete(rows.len() as u64))
+    .limitation(Limitation::new("operator_names", "Operators are listed by their instruction names and arguments; the module's own WAT form (formats_wasm_module_show with include_wat) renders nesting and labels."))
+    .location(Location::new("path", input.path.display().to_string()))
+    .build()?;
+    Ok(ToolOutput::evidence(ev))
+}
+
 // ---------------------------------------------------------------------------------------------
 // EVM
 
@@ -480,6 +579,25 @@ mod tests {
         assert_eq!(n["result"]["is_go"], false);
         let err = call_err(&e, "native_go_binary_show", json!({"path": "relative"}));
         assert_eq!(err.code, craft_anything_evidence::ErrorCode::BadInput);
+    }
+
+    /// R2.13: one function's instructions, constants and named calls come back by name —
+    /// what a mechanics sheet cites, without anyone writing their own disassembly script.
+    #[test]
+    fn one_wasm_function_reads_as_instructions_constants_and_calls() {
+        let e = Engine::new(crate::testing::session());
+        let p = temp_file("demo.wasm", &fx::wasm_module());
+        let v = call(&e, "formats_wasm_function_show", json!({"path": p, "function": "_start"}));
+        let f = &v["result"]["functions"][0];
+        assert_eq!((f["name"].as_str(), f["ops"].as_array().map(Vec::len)), (Some("_start"), Some(3)), "{v}");
+        assert_eq!(f["constants"][0]["value"], "i32.const 7", "{v}");
+        assert_eq!(f["calls"][0]["target"], "log", "{v}");
+        // `func <index>` picks by index; a name nothing has says so and names the listing tool.
+        let v = call(&e, "formats_wasm_function_show", json!({"path": p, "function": "func 1"}));
+        assert_eq!(v["result"]["functions"][0]["name"], "add", "{v}");
+        let err = call_err(&e, "formats_wasm_function_show", json!({"path": p, "function": "nope"}));
+        assert!(err.message.contains("no function matches"), "{:?}", err.message);
+        assert!(err.remediation.as_deref().unwrap_or("").contains("formats_wasm_module_show"), "{:?}", err.remediation);
     }
 
     #[test]

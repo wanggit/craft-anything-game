@@ -593,6 +593,116 @@ impl wasmprinter::Print for CappedText {
     }
 }
 
+/// One function's body, read instruction by instruction (R2.13): the operators in their own
+/// names, the constants with their positions, and the calls with their targets named. This is
+/// the reading that had builders writing their own disassembly scripts against 87k-function
+/// modules.
+pub struct FunctionText {
+    pub index: u32,
+    pub name: Option<String>,
+    /// The operators in WAT vocabulary (`i32.add`, `call`), at most `op_cap` of them.
+    pub ops: Vec<String>,
+    pub truncated: bool,
+    /// (op position, the constant as written in WAT, e.g. `i32.const 7`).
+    pub constants: Vec<(u64, String)>,
+    /// (op position, the call target as its name, or `func <index>` without one).
+    pub calls: Vec<(u64, String)>,
+}
+
+/// Read one function's instructions (`index` is the function index space, imports first). The
+/// operator list is capped at `op_cap`; the constants and calls are collected in full.
+pub fn function_text(data: &[u8], index: u32, op_cap: usize) -> Result<FunctionText, FormatError> {
+    if !is_wasm(data) {
+        return Err(FormatError::Malformed("no WebAssembly magic (\\0asm)".into()));
+    }
+    // Two passes: the name section sits after the code, so the names must be read before a
+    // body's calls can be resolved to them.
+    let mut names: BTreeMap<u32, String> = BTreeMap::new();
+    for payload in Parser::new(0).parse_all(data) {
+        let Ok(payload) = payload else { break };
+        if let Payload::CustomSection(c) = payload
+            && let KnownCustom::Name(reader) = c.as_known()
+        {
+            for sub in reader.into_iter().take(64) {
+                if let Ok(Name::Function(map)) = sub {
+                    for n in map.into_iter().take(MAX_ITEMS) {
+                        let Ok(n) = n else { break };
+                        names.insert(n.index, n.name.to_string());
+                    }
+                }
+            }
+        }
+    }
+    let mut imported = 0u32;
+    let mut code_index = 0u32;
+    let mut out: Option<FunctionText> = None;
+    for payload in Parser::new(0).parse_all(data) {
+        let Ok(payload) = payload else { break };
+        match payload {
+            Payload::ImportSection(r) => {
+                for imp in r.into_imports() {
+                    let Ok(imp) = imp else { break };
+                    if matches!(imp.ty, TypeRef::Func(_) | TypeRef::FuncExact(_)) {
+                        imported = imported.saturating_add(1);
+                    }
+                }
+            }
+            Payload::CodeSectionEntry(body) => {
+                // The function index space counts imports first; the code section doesn't.
+                if imported.saturating_add(code_index) == index {
+                    let mut rec =
+                        FunctionText { index, name: names.get(&index).cloned(), ops: Vec::new(), truncated: false, constants: Vec::new(), calls: Vec::new() };
+                    if let Ok(reader) = body.get_operators_reader() {
+                        for (at, op) in reader.into_iter().enumerate() {
+                            let at = at as u64;
+                            let Ok(op) = op else {
+                                rec.truncated = true;
+                                break;
+                            };
+                            let text = match op {
+                                wasmparser::Operator::I32Const { value } => {
+                                    rec.constants.push((at, format!("i32.const {value}")));
+                                    format!("i32.const {value}")
+                                }
+                                wasmparser::Operator::I64Const { value } => {
+                                    rec.constants.push((at, format!("i64.const {value}")));
+                                    format!("i64.const {value}")
+                                }
+                                wasmparser::Operator::F32Const { value } => {
+                                    let v: f32 = value.into();
+                                    rec.constants.push((at, format!("f32.const {v}")));
+                                    format!("f32.const {v}")
+                                }
+                                wasmparser::Operator::F64Const { value } => {
+                                    let v: f64 = value.into();
+                                    rec.constants.push((at, format!("f64.const {v}")));
+                                    format!("f64.const {v}")
+                                }
+                                wasmparser::Operator::Call { function_index } => {
+                                    let target = names.get(&function_index).map_or_else(|| format!("func {function_index}"), |n| n.clone());
+                                    rec.calls.push((at, target.clone()));
+                                    format!("call {target}")
+                                }
+                                other => format!("{other:?}"),
+                            };
+                            if rec.ops.len() < op_cap.max(1) {
+                                rec.ops.push(text);
+                            } else {
+                                rec.truncated = true;
+                            }
+                        }
+                    }
+                    out = Some(rec);
+                }
+                code_index = code_index.saturating_add(1);
+            }
+            Payload::End(_) => break,
+            _ => {}
+        }
+    }
+    out.ok_or_else(|| FormatError::Unsupported(format!("no function with index {index} (it may be an import only)")))
+}
+
 /// The text format of a module, at most `cap` bytes: (text, truncated). Only call this on
 /// modules that passed [`validate`]; damaged modules are not rendered.
 pub fn to_wat(data: &[u8], cap: usize) -> Result<(String, bool), String> {
@@ -652,6 +762,30 @@ pub fn scan_glue(text: &str, imports: &[WasmImport]) -> GlueScan {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// R2.13: one function reads as its instructions, its constants and its named calls — the
+    /// reading a mechanics sheet cites. (The fixture module: `log` (imported), `add`,
+    /// `_start` = i32.const 7; call log.)
+    #[test]
+    fn reads_one_functions_instructions_constants_and_calls() {
+        let m = craft_anything_testkit::formats::wasm_module();
+        let t = function_text(&m, 2, 600).unwrap();
+        assert_eq!(t.name.as_deref(), Some("_start"));
+        assert_eq!(t.ops, ["i32.const 7", "call log", "End"], "{:?}", t.ops);
+        assert_eq!(t.constants, [(0, "i32.const 7".to_string())]);
+        assert_eq!(t.calls, [(1, "log".to_string())], "the import's name resolves");
+        assert!(!t.truncated);
+        let add = function_text(&m, 1, 600).unwrap();
+        assert_eq!(add.name.as_deref(), Some("add"));
+        assert_eq!(add.ops.len(), 4, "{:?}", add.ops);
+        assert!(add.constants.is_empty() && add.calls.is_empty());
+        // The operator list caps (and says so); the census stays complete.
+        let capped = function_text(&m, 2, 1).unwrap();
+        assert_eq!(capped.ops.len(), 1);
+        assert!(capped.truncated && capped.constants.len() == 1 && capped.calls.len() == 1);
+        // A name the module doesn't have says so instead of guessing.
+        assert!(matches!(function_text(&m, 99, 600), Err(FormatError::Unsupported(_))));
+    }
     use craft_anything_testkit::formats as fx;
 
     #[test]

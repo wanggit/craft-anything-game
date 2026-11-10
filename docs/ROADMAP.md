@@ -957,10 +957,14 @@ the states.
       — claimed: claude, branch feature/r2.13-etc2-textures; PR #19
 - [ ] Sprite-atlas rect resolution (the missing external SpriteAtlas captured with the game) and
       audio out (R3.9's sound line) complete the set
-- [ ] wasm/IL2CPP recovery is tools: `game_il2cpp_map` (metadata names ↔ wasm functions),
-      `game_wasm_decompile` (per-function disassembly and constants), `game_config_dump`
-      (serialized config fields), and the MECHANICS.md contract check (values cite functions or
-      addresses, estimates labelled) extends to web games
+- [x] Per-function wasm reading is a tool: `formats_wasm_function_show` — the function's
+      instruction list, its constants (i32/i64/f32/f64 with where they sit) and its calls
+      resolved to function names, picked by name — the workflow that had builders writing their
+      own wasm-fn.py against 87k-function modules
+      — claimed: claude, branch feature/r2.13-wasm-function; PR #20
+- [ ] `game_config_dump` reads a MonoBehaviour's serialized fields by its metadata type layout
+      (the values a mechanics sheet cites), and the MECHANICS.md contract check (values cite
+      functions or addresses, estimates labelled) extends to web games
 - [ ] The brief is staged and bounded: extract assets → recover mechanics → build UI against the
       state references → implement from the numbers → verify per state; no builder-built analysis
       tooling (the tools above exist), an analysis budget, and a new session per stage (a 14 MB
