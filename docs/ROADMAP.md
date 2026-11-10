@@ -938,10 +938,11 @@ the states.
       boot-screen 100% no longer carries a game (claims at a 50% floor — the finish bar waits
       for measurement)
       — claimed: claude, branch feature/r2.13-play-states; PR #16
-- [ ] `game_assets_extract` orchestrates what the tools can decode: decompress .unityweb/zip
-      streams, export every decodable texture (DXT family, uncompressed) as PNG, copy what it
-      cannot decode as it is, and write a source manifest that lists everything skipped (a
-      crunched texture, an audio clip) by name, class and size instead of dropping it silently
+- [x] `game_assets_extract` orchestrates what the tools can decode: decompress .unityweb/.gz
+      streams (a .zip goes to core_archive_extract first), export every decodable texture (DXT
+      family, uncompressed) as PNG, copy what it cannot decode as it is (a crunched texture, an
+      audio clip), and write a manifest.json that names everything with its source, size and any
+      reason it was skipped instead of dropping it silently
       — claimed: claude, branch feature/r2.13-assets-extract
 - [ ] Crunch and ETC2 texture decode ship with the extract (an engines-wrapped converter
       installed once, or a Rust decoder): builders keep rebuilding them from source, hours per

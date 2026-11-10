@@ -399,6 +399,7 @@ Every build of this project.	此项目的每次构建。
 Every finding is saved here with how sure we are.	每项发现及其可信程度都会保存在这里。
 Every tool as well: a workbench with functions, bytes, references and evidence.	还可使用所有工具：在工作台中查看函数、字节、引用和证据。
 Everything found so far, as a Markdown file.	将目前找到的所有内容保存为 Markdown 文件。
+Extract a game's assets	批量导出游戏素材
 Everything so far is kept. Continue picks up where it stopped.	目前的成果已全部保留。点击继续即可从停止处接着进行。
 Evidence	证据
 Evidence ledger	证据记录

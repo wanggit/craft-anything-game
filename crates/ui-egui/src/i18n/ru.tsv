@@ -387,6 +387,7 @@ Every build of this project.	Все сборки этого проекта.
 Every finding is saved here with how sure we are.	Каждая находка сохраняется здесь с указанием степени нашей уверенности.
 Every tool as well: a workbench with functions, bytes, references and evidence.	А также все инструменты: рабочее место с функциями, байтами, ссылками и доказательствами.
 Everything found so far, as a Markdown file.	Всё найденное до сих пор, в виде файла Markdown.
+Extract a game's assets	Извлечь ресурсы игры
 Everything so far is kept. Continue picks up where it stopped.	Всё сделанное до сих пор сохранено. «Продолжить» продолжит с того места, где остановилось.
 Evidence	Доказательства
 Evidence ledger	Журнал доказательств

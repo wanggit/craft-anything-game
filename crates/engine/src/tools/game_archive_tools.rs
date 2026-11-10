@@ -96,6 +96,17 @@ pub fn specs() -> Vec<ToolSpec> {
             game_unity_asset_export,
         ),
         spec(
+            "game_assets_extract",
+            "Extract a game's assets",
+            "Take a game's own assets out in bulk from a Unity data file, bundle, compressed .unityweb/.gz stream, or a folder of them (an unpacked Build.data): every texture the codec reads becomes a PNG under textures/, compressed streams are decompressed first, what isn't decoded here (a crunched texture, an audio clip) is copied as raw bytes under raw/, and everything else is named and listed. manifest.json records every item with its source file, path id, size and — for anything skipped — the reason, so nothing is dropped silently. Output goes to `output`, an absolute folder that doesn't exist yet.",
+            "Take a game's pictures and files out in bulk, and list what couldn't be opened.",
+            Toolset::Formats,
+            Effects::EVIDENCE.union(Effects::WRITES_FILESYSTEM).union(Effects::CARRIES_TARGET_CONTENT),
+            Requires::Nothing,
+            schema_of::<AssetsExtractParams>,
+            game_assets_extract,
+        ),
+        spec(
             "game_unreal_texture_export",
             "Take a texture out of an Unreal game",
             "Save a texture of an Unreal Engine 4.26-4.27 game as a PNG, only when the person confirms they may unpack the game (permission: true; they made it or its rights holder allows it). path is the game's .pak (then `file` is the texture's .uasset path inside it, as game_pak_list shows it) or a .uasset already taken out, with its .uexp (and .ubulk) beside it. The largest mip the game ships is saved at `output` (an absolute path that doesn't exist yet). Formats: B8G8R8A8, R8G8B8A8, G8, A8, DXT1, DXT5, BC4, BC5, BC6H (tone-mapped to 8 bits) and BC7; others (ASTC…) are refused by name, as are Oodle-compressed and encrypted paks, Unreal 5 packages and packages written without property names.",
@@ -860,6 +871,384 @@ fn game_unity_asset_export(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutpu
     Ok(ToolOutput::evidence(b.build()?))
 }
 
+// ---------------------------------------------------------------------------------------------
+// game_assets_extract
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AssetsExtractParams {
+    /// Absolute path to take the assets from: a Unity serialized file or bundle, a compressed
+    /// .unityweb/.gz stream, or a folder of them (an unpacked Build.data, a <Game>_Data folder).
+    pub path: String,
+    /// Absolute path of a folder that does not exist yet; the extracted originals go there.
+    pub output: String,
+    /// Most textures to decode into PNG (1..=2000, default 500); the rest are listed, not lost.
+    #[serde(default = "d_assets_textures")]
+    pub max_textures: usize,
+}
+
+fn d_assets_textures() -> usize {
+    500
+}
+
+/// The most input files a folder walk considers.
+const MAX_INPUTS: usize = 2000;
+/// The most objects read from one serialized file.
+const MAX_OBJECTS: usize = 20_000;
+/// The most bytes copied raw (undecodable textures, audio) before the rest are only listed.
+const RAW_BUDGET: u64 = 512 << 20;
+/// The most bytes a compressed stream may expand to.
+const STREAM_CAP: u64 = 2 << 30;
+
+/// A file name safe to write under the output folder.
+fn safe_name(s: &str) -> String {
+    let mut out: String = s.chars().map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' { c } else { '_' }).collect();
+    if out.len() > 80 {
+        out.truncate(80);
+    }
+    if out.is_empty() {
+        out.push_str("unnamed");
+    }
+    out
+}
+
+/// What kind of file the first bytes say this is.
+fn stream_kind(head: &[u8]) -> &'static str {
+    if head.starts_with(&[0x1f, 0x8b]) {
+        "gzip"
+    } else if head.starts_with(b"PK\x03\x04") {
+        "zip"
+    } else if head.starts_with(unity_bundle::MAGIC) {
+        "bundle"
+    } else {
+        "other"
+    }
+}
+
+/// The running tally of one extraction.
+struct Extracted {
+    rows: Vec<Value>,
+    textures: usize,
+    max_textures: usize,
+    raw_left: u64,
+    skipped: Vec<Value>,
+}
+
+impl Extracted {
+    fn new(max_textures: usize) -> Self {
+        Extracted { rows: Vec::new(), textures: 0, max_textures, raw_left: RAW_BUDGET, skipped: Vec::new() }
+    }
+}
+
+/// Copy one object's bytes as they are (a texture that isn't decoded here, an audio clip) into
+/// `raw/`, against the raw-copy budget.
+fn copy_raw(raw_left: &mut u64, out: &Path, label: &str, name: &str, path_id: i64, bytes: &[u8], rows: &mut Vec<Value>) {
+    if *raw_left == 0 {
+        rows.push(json!({"kind": "raw_skipped", "from": label, "path_id": path_id, "size": bytes.len(), "reason": "the raw-copy budget ran out"}));
+        return;
+    }
+    let take = (bytes.len() as u64).min(*raw_left);
+    *raw_left -= take;
+    let file = format!("raw/{}-{}-{}.bin", safe_name(label), safe_name(name), path_id);
+    let _ = std::fs::create_dir_all(out.join("raw"));
+    match crate::project::write_atomic(&out.join(&file), &bytes[..take as usize]) {
+        Ok(_) => rows.push(json!({"kind": "raw", "from": label, "path_id": path_id, "name": name, "size": take, "file": file})),
+        Err(e) => rows.push(json!({"kind": "raw_skipped", "from": label, "path_id": path_id, "size": take, "reason": e.to_string()})),
+    }
+}
+
+/// Take every object out of one serialized file: textures the codec reads become PNGs, the rest
+/// are named and listed (and copied raw where that helps).
+fn extract_serialized(ctx: &Ctx<'_>, src: &mut Serialized, label: &str, out: &Path, state: &mut Extracted) -> Result<(), ToolError> {
+    let head = src.read(0, src.len().min(unity_serialized::HEADER_READ as u64))?;
+    let h = unity_serialized::header(&head, src.len()).map_err(|e| format_err(e, "a Unity serialized file"))?;
+    let meta = src.read(0, h.metadata_offset + h.metadata_size)?;
+    let m = unity_serialized::metadata(&meta, &h).map_err(|e| format_err(e, "a Unity serialized file"))?;
+    let version = known_version(&m.unity_version, Path::new(label));
+    for o in m.objects.iter().take(MAX_OBJECTS) {
+        ctx.cancel.check()?;
+        let bytes = match src.read(o.offset, u64::from(o.size)) {
+            Ok(b) => b,
+            Err(e) => {
+                state.rows.push(json!({"kind": "unreadable", "from": label, "class": unity_serialized::class_name(o.class_id), "path_id": o.path_id, "size": o.size, "reason": e.message}));
+                continue;
+            }
+        };
+        let name = unity_serialized::object_name(o.class_id, &h, &bytes).unwrap_or_default();
+        if o.class_id != 28 {
+            let kind = if o.class_id == 83 { "audio" } else { "object" };
+            state.rows.push(json!({"kind": kind, "from": label, "class": unity_serialized::class_name(o.class_id), "class_id": o.class_id, "path_id": o.path_id, "size": o.size, "name": name}));
+            if o.class_id == 83 {
+                copy_raw(&mut state.raw_left, out, label, &name, o.path_id, &bytes, &mut state.rows);
+            }
+            continue;
+        }
+        // A texture: decode it when the codec knows the format, copy it raw when not.
+        if state.textures >= state.max_textures {
+            state.rows.push(json!({"kind": "untried", "from": label, "class": "Texture2D", "path_id": o.path_id, "name": name, "size": o.size, "reason": "over the max_textures limit"}));
+            continue;
+        }
+        state.textures += 1;
+        let decoded = (|| -> Result<(String, String, u32, u32, Vec<u8>), String> {
+            if stripped(&version) {
+                return Err("the file doesn't say which Unity version wrote it".into());
+            }
+            let t = unity_texture::parse(&bytes, &version, h.big_endian).map_err(|e| e.to_string())?;
+            let format = unity_texture::format_name(t.format).to_string();
+            if u64::from(t.width) * u64::from(t.height) > MAX_PIXELS {
+                return Err(format!("{}×{} is over 8192×8192", t.width, t.height));
+            }
+            let need = unity_texture::mip0_size(t.format, t.width, t.height).ok_or_else(|| format!("{format} textures aren't decoded here"))? as u64;
+            let pixels = match (&t.inline, &t.stream) {
+                (Some((start, len)), _) => bytes.get(*start..*start + *len).map(<[u8]>::to_vec).unwrap_or_default(),
+                (None, Some(s)) => src.stream(&s.path, s.offset, need.min(u64::from(s.size))).map_err(|e| e.message)?,
+                (None, None) => Vec::new(),
+            };
+            let rgba = unity_texture::decode(t.format, t.width, t.height, &pixels).map_err(|e| e.to_string())?;
+            let png = encode_png(&Image { width: t.width, height: t.height, rgba }).map_err(|e| e.message)?;
+            Ok((t.name, format, t.width, t.height, png))
+        })();
+        match decoded {
+            Ok((tname, format, width, height, png)) => {
+                let file = format!("textures/{}-{}-{}.png", safe_name(label), safe_name(&tname), o.path_id);
+                let _ = std::fs::create_dir_all(out.join("textures"));
+                crate::project::write_atomic(&out.join(&file), &png)?;
+                state.rows.push(json!({
+                    "kind": "texture", "from": label, "path_id": o.path_id, "name": tname,
+                    "format": format, "width": width, "height": height, "file": file,
+                    "size": png.len(), "sha256": craft_anything_evidence::sha256_hex(&png),
+                }));
+            }
+            Err(reason) => {
+                copy_raw(&mut state.raw_left, out, label, &name, o.path_id, &bytes, &mut state.rows);
+                state.rows.push(
+                    json!({"kind": "undecoded", "from": label, "class": "Texture2D", "path_id": o.path_id, "name": name, "size": o.size, "reason": reason}),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Decompress one stream (gzip or brotli) into `out/streams/`; None for a kind it won't touch.
+fn decompress_stream(path: &Path, head: &[u8], out: &Path) -> Result<Option<(PathBuf, String)>, ToolError> {
+    let kind = match stream_kind(head) {
+        "gzip" => "gzip",
+        "other" if matches!(path.extension().and_then(|e| e.to_str()), Some("unityweb" | "br")) => "brotli",
+        _ => return Ok(None),
+    };
+    let file = std::fs::read(path).map_err(|e| ToolError::io(path.display(), e))?;
+    let mut expanded: Vec<u8> = Vec::new();
+    let mut limited = false;
+    {
+        let mut counter = LimitedWrite { out: &mut expanded, left: STREAM_CAP, limited: &mut limited };
+        if kind == "gzip" {
+            let mut reader = flate2::read::GzDecoder::new(file.as_slice());
+            std::io::copy(&mut reader, &mut counter).map_err(|e| ToolError::invalid(format!("{} didn't decompress: {e}", path.display())))?;
+        } else {
+            brotli::BrotliDecompress(&mut file.as_slice(), &mut counter)
+                .map_err(|e| ToolError::invalid(format!("{} didn't decompress: {e}", path.display())))?;
+        }
+    }
+    let name = format!("streams/{}", safe_name(path.file_name().and_then(|n| n.to_str()).unwrap_or("stream")));
+    let _ = std::fs::create_dir_all(out.join("streams"));
+    crate::project::write_atomic(&out.join(&name), &expanded)?;
+    Ok(Some((out.join(&name), if limited { format!("{kind}, truncated at 2 GiB") } else { kind.to_string() })))
+}
+
+/// A writer that stops at a byte cap and says so.
+struct LimitedWrite<'a> {
+    out: &'a mut Vec<u8>,
+    left: u64,
+    limited: &'a mut bool,
+}
+
+impl std::io::Write for LimitedWrite<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.left == 0 {
+            *self.limited = true;
+            return Ok(buf.len()); // swallow: the decompressor must not error, the note tells
+        }
+        let take = (buf.len() as u64).min(self.left) as usize;
+        self.out.extend_from_slice(&buf[..take]);
+        self.left -= take as u64;
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Every input file under `root` (a walk of bounded depth and count, or the file itself).
+fn input_files(root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![(root.to_path_buf(), 0usize)];
+    while let Some((dir, depth)) = stack.pop() {
+        if out.len() >= MAX_INPUTS {
+            break;
+        }
+        if dir.is_file() {
+            out.push(dir);
+            continue;
+        }
+        if depth > 6 {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for e in entries.flatten() {
+            if out.len() >= MAX_INPUTS {
+                break;
+            }
+            let p = e.path();
+            let Ok(meta) = std::fs::symlink_metadata(&p) else { continue };
+            if meta.is_dir() {
+                if !matches!(e.file_name().to_string_lossy().as_ref(), "node_modules" | ".git") {
+                    stack.push((p, depth + 1));
+                }
+            } else if meta.is_file() {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
+/// Take a game's own assets out in bulk (R2.13): decompress what is compressed, decode every
+/// texture the codec reads into PNG, copy what it cannot decode as it is, and write a manifest
+/// that names everything skipped — nothing is dropped silently, so a rebuild never rebuilds
+/// what exists in the game's files.
+fn game_assets_extract(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, ToolError> {
+    let p: AssetsExtractParams = parse_params(params)?;
+    if !(1..=2000).contains(&p.max_textures) {
+        return Err(ToolError::invalid("max_textures must be 1..=2000"));
+    }
+    let root = PathBuf::from(&p.path);
+    if !root.is_absolute() {
+        return Err(ToolError::invalid(format!("{:?} is not an absolute path", p.path))
+            .with_remediation("Pass the full path of the game data to take the assets from."));
+    }
+    if !root.exists() {
+        return Err(ToolError::new(ErrorCode::NotFound, format!("{} does not exist.", root.display())).with_remediation("Pass a game data file or folder."));
+    }
+    let out = super::artifact_tools::create_absent_dir(&p.output)?;
+    let mut state = Extracted::new(p.max_textures);
+    let mut queue: Vec<PathBuf> = Vec::new();
+    for f in input_files(&root) {
+        if queue.len() + state.rows.len() >= MAX_INPUTS * 2 {
+            break;
+        }
+        let head = std::fs::File::open(&f).and_then(|mut file| {
+            use std::io::Read as _;
+            let mut head = [0u8; 16];
+            let n = file.read(&mut head)?;
+            Ok(head[..n].to_vec())
+        });
+        let Ok(head) = head else { continue };
+        if matches!(stream_kind(&head), "gzip") || matches!(f.extension().and_then(|e| e.to_str()), Some("unityweb" | "br")) {
+            ctx.report(None, format!("Decompressing {}…", f.display()));
+            match decompress_stream(&f, &head, &out)? {
+                Some((into, how)) => {
+                    state.rows.push(json!({"kind": "stream", "from": f.display().to_string(), "file": into.strip_prefix(&out).map(|x| x.display().to_string()).unwrap_or_default(), "how": how, "size": std::fs::metadata(&into).map(|m| m.len()).unwrap_or(0)}));
+                    queue.push(into);
+                }
+                None => state.skipped.push(json!({"path": f.display().to_string(), "reason": "a compressed stream this tool won't decompress"})),
+            }
+            continue;
+        }
+        queue.push(f);
+    }
+    for f in queue {
+        ctx.cancel.check()?;
+        let label = f.file_name().and_then(|n| n.to_str()).unwrap_or("file").to_string();
+        let probe = std::fs::File::open(&f).and_then(|mut file| {
+            use std::io::Read as _;
+            let mut head = [0u8; 16];
+            let n = file.read(&mut head)?;
+            Ok(head[..n].to_vec())
+        });
+        let is_zip = probe.as_ref().map(|h| stream_kind(h) == "zip").unwrap_or(false);
+        let is_bundle = probe.as_ref().map(|h| stream_kind(h) == "bundle").unwrap_or(false);
+        if is_zip {
+            state.skipped.push(json!({"path": f.display().to_string(), "reason": "a .zip container: unpack it with core_archive_extract first"}));
+            continue;
+        }
+        if is_bundle {
+            // Each serialized file inside the bundle becomes its own pass (Serialized::open picks
+            // a node by name).
+            let names = bundle_serialized_names(&f)?;
+            for n in names {
+                ctx.cancel.check()?;
+                match Serialized::open(&f.to_string_lossy(), Some(&n)) {
+                    Ok(mut src) => {
+                        let l = format!("{label}:{n}");
+                        if let Err(e) = extract_serialized(ctx, &mut src, &l, &out, &mut state) {
+                            state.skipped.push(json!({"path": l, "reason": e.message}));
+                        }
+                    }
+                    Err(e) => state.skipped.push(json!({"path": format!("{label}:{n}"), "reason": e.message})),
+                }
+            }
+            continue;
+        }
+        match Serialized::open(&f.to_string_lossy(), None) {
+            Ok(mut src) => {
+                if let Err(e) = extract_serialized(ctx, &mut src, &label, &out, &mut state) {
+                    // Not a serialized file at all: say so and move on (a .resS is expected here).
+                    state.skipped.push(json!({"path": f.display().to_string(), "reason": e.message}));
+                }
+            }
+            Err(e) => state.skipped.push(json!({"path": f.display().to_string(), "reason": e.message})),
+        }
+    }
+    let textures = state.rows.iter().filter(|r| r["kind"] == "texture").count();
+    let undecoded = state.rows.iter().filter(|r| r["kind"] == "undecoded").count();
+    let audio = state.rows.iter().filter(|r| r["kind"] == "audio").count();
+    let objects = state.rows.iter().filter(|r| r["kind"] == "object").count();
+    let manifest = json!({
+        "version": 1,
+        "source": root.display().to_string(),
+        "output": out.display().to_string(),
+        "counts": {"textures": textures, "undecoded": undecoded, "audio": audio, "objects": objects, "skipped_files": state.skipped.len()},
+        "assets": state.rows,
+        "skipped": state.skipped,
+    });
+    let json_bytes = serde_json::to_vec_pretty(&manifest).map_err(|e| ToolError::internal(e.to_string()))?;
+    crate::project::write_atomic(&out.join("manifest.json"), &json_bytes)?;
+    let readme = format!(
+        "# Extracted game assets\n\nTaken from {}.\n\n- {textures} texture(s) decoded to PNG under textures/\n- {undecoded} texture(s) not decoded here (kept as raw bytes under raw/, listed in manifest.json)\n- {audio} audio clip(s) kept as raw bytes (sound decoding ships separately)\n- {objects} other object(s) named and listed in manifest.json\n- {} file(s) skipped, each with its reason in manifest.json\n\nmanifest.json lists every item with its source file, path id and size.\n",
+        root.display(),
+        state.skipped.len()
+    );
+    crate::project::write_atomic(&out.join("README.md"), readme.as_bytes())?;
+    let name = root.file_name().map(|n| n.to_string_lossy().into_owned());
+    let summary = format!(
+        "Took {} game asset(s) out of {} into {}: {textures} texture(s) as PNG, {undecoded} texture(s) and {audio} audio clip(s) kept raw (listed, not lost), {} file(s) skipped with reasons.",
+        state.rows.len(),
+        root.display(),
+        out.display(),
+        state.skipped.len()
+    );
+    let b = builder(ctx, "game_assets_extract", Subject { kind: "archive".into(), sha256: None, name }, params_json(&p))
+        .result(manifest)
+        .summary(summary)
+        .confidence(Confidence::Observed)
+        .coverage(Coverage::complete(state.rows.len() as u64))
+        .limitation(Limitation::new("formats_not_decoded", "Crunched and ETC2 textures, and audio streams, aren't decoded here: they are copied as raw bytes and listed in manifest.json for the tools that will."))
+        .location(Location::new("path", out.display().to_string()));
+    Ok(ToolOutput::evidence(b.build()?))
+}
+
+/// The serialized files inside a UnityFS bundle, in table order.
+fn bundle_serialized_names(path: &Path) -> Result<Vec<String>, ToolError> {
+    let mut file = File::open(path).map_err(|e| ToolError::io(path.display(), e))?;
+    let len = file.metadata().map_err(|e| ToolError::io(path.display(), e))?.len();
+    let head = read_at(&mut file, path, 0, len.min(unity_bundle::HEADER_READ as u64))?;
+    let h = unity_bundle::header(&head, len).map_err(|e| format_err(e, "a Unity bundle"))?;
+    let table = read_at(&mut file, path, h.table_offset, u64::from(h.table_size))?;
+    let (_blocks, nodes) = unity_bundle::table(&table, &h).map_err(|e| format_err(e, "a Unity bundle's block table"))?;
+    Ok(nodes.iter().filter(|n| n.flags & 4 != 0).map(|n| n.path.clone()).collect())
+}
+
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct UnrealTextureParams {
@@ -1531,6 +1920,79 @@ mod tests {
         assert_eq!(v["result"]["name"].as_str(), Some("Wall"), "{v}");
         let png = crate::tools::web_common::decode_png(&std::fs::read(&out).unwrap()).unwrap();
         assert!(png.rgba.as_chunks::<4>().0.iter().all(|p| *p == [255, 0, 0, 255]));
+    }
+
+    /// R2.13: the bulk extract decodes every texture the codec reads, keeps what it can't decode
+    /// as raw bytes (a crunched texture, an audio clip), and names everything in the manifest —
+    /// nothing is dropped silently.
+    #[test]
+    fn bulk_extract_decodes_lists_and_keeps_what_it_cannot_decode() {
+        use craft_anything_testkit::games::{unity_serialized_file, unity_texture2d};
+        let e = Engine::new(crate::testing::session());
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let red = [0x00, 0xf8, 0x1f, 0x00, 0, 0, 0, 0]; // one DXT1 block
+        let data = unity_serialized_file(
+            "2022.3.62f1",
+            &[
+                (28, unity_texture2d("2022.3.62f1", "Wall", 4, 4, 10, Some(&red), None)),
+                (28, unity_texture2d("2022.3.62f1", "Crunched", 4, 4, 200, Some(&red), None)),
+                (83, b"OggS\0fake-audio".to_vec()),
+            ],
+        );
+        std::fs::write(src.join("sharedassets0.assets"), &data).unwrap();
+        let out = dir.path().join("originals");
+        let v = e
+            .call(
+                "game_assets_extract",
+                json!({"path": dir.path().join("src").display().to_string(), "output": out.display().to_string()}),
+                CallOptions::new(Caller::Mcp),
+            )
+            .unwrap()
+            .to_json();
+        let r = &v["result"];
+        assert_eq!((r["counts"]["textures"].as_u64(), r["counts"]["undecoded"].as_u64(), r["counts"]["audio"].as_u64()), (Some(1), Some(1), Some(1)), "{v}");
+        // The decoded texture is a real PNG of the right colour.
+        let png = crate::tools::web_common::decode_png(&std::fs::read(out.join("textures/sharedassets0.assets-Wall-1.png")).unwrap()).unwrap();
+        assert!(png.rgba.as_chunks::<4>().0.iter().all(|p| *p == [255, 0, 0, 255]));
+        // The crunched texture and the audio clip are kept as raw bytes and named in the manifest.
+        let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(out.join("manifest.json")).unwrap()).unwrap();
+        let rows = manifest["assets"].as_array().unwrap();
+        let by_kind = |kind: &str| rows.iter().filter(|x| x["kind"] == kind).count();
+        assert_eq!((by_kind("texture"), by_kind("undecoded"), by_kind("audio"), by_kind("raw")), (1, 1, 1, 2), "{manifest}");
+        let undecoded = rows.iter().find(|x| x["kind"] == "undecoded").unwrap();
+        assert!(undecoded["reason"].as_str().unwrap().contains("aren't decoded here"), "{undecoded}");
+        for row in rows.iter().filter(|x| x["kind"] == "raw") {
+            assert!(out.join(row["file"].as_str().unwrap()).is_file(), "{row}");
+        }
+        assert!(v["summary"].as_str().unwrap().contains("kept raw (listed, not lost)"), "{v}");
+    }
+
+    /// R2.13: a compressed .unityweb stream is decompressed first and its assets extracted too.
+    #[test]
+    fn a_gzip_stream_is_decompressed_and_read() {
+        use craft_anything_testkit::games::{unity_serialized_file, unity_texture2d};
+        let e = Engine::new(crate::testing::session());
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let red = [0x00, 0xf8, 0x1f, 0x00, 0, 0, 0, 0];
+        let data = unity_serialized_file("2022.3.62f1", &[(28, unity_texture2d("2022.3.62f1", "Wall", 4, 4, 10, Some(&red), None))]);
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut enc, &data).unwrap();
+        std::fs::write(src.join("Build.data.unityweb"), enc.finish().unwrap()).unwrap();
+        let out = dir.path().join("originals");
+        let v = e
+            .call("game_assets_extract", json!({"path": src.display().to_string(), "output": out.display().to_string()}), CallOptions::new(Caller::Mcp))
+            .unwrap()
+            .to_json();
+        let r = &v["result"];
+        assert_eq!(r["counts"]["textures"].as_u64(), Some(1), "{v}");
+        let streams = r["assets"].as_array().unwrap().iter().filter(|x| x["kind"] == "stream").count();
+        assert_eq!(streams, 1, "the stream row names how it was decompressed: {v}");
+        assert!(out.join("streams/Build.data.unityweb").is_file());
+        assert!(out.join("textures/Build.data.unityweb-Wall-1.png").is_file());
     }
 
     #[test]

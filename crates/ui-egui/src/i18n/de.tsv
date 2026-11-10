@@ -399,6 +399,7 @@ Every build of this project.	Jeder Build dieses Projekts.
 Every finding is saved here with how sure we are.	Jeder Befund wird hier gespeichert, mit der Angabe, wie sicher wir sind.
 Every tool as well: a workbench with functions, bytes, references and evidence.	Auch jedes Werkzeug: eine Werkbank mit Funktionen, Bytes, Verweisen und Belegen.
 Everything found so far, as a Markdown file.	Alles bisher Gefundene als Markdown-Datei.
+Extract a game's assets	Die Spielassets eines Spiels extrahieren
 Everything so far is kept. Continue picks up where it stopped.	Alles bisherige bleibt erhalten. „Weiter“ macht dort weiter, wo es aufgehört hat.
 Evidence	Belege
 Evidence ledger	Beleg-Verzeichnis

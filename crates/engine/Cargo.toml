@@ -27,6 +27,8 @@ log = { workspace = true }
 toml = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
+flate2 = "1"
+brotli = "7"
 regex = { workspace = true }
 dirs = "6"
 # Browser (Chrome DevTools Protocol) client: hand-rolled WebSocket framing needs only a SHA-1 and

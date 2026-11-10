@@ -399,6 +399,7 @@ Every build of this project.	Každé sestavení tohoto projektu.
 Every finding is saved here with how sure we are.	Každé zjištění se zde ukládá spolu s mírou jistoty.
 Every tool as well: a workbench with functions, bytes, references and evidence.	Také všechny nástroje: pracovní plocha s funkcemi, bajty, odkazy a důkazy.
 Everything found so far, as a Markdown file.	Vše dosud zjištěné jako soubor Markdown.
+Extract a game's assets	Extrahovat herní assety
 Everything so far is kept. Continue picks up where it stopped.	Dosavadní práce je zachována. Tlačítko Pokračovat naváže tam, kde skončila.
 Evidence	Důkazy
 Evidence ledger	Evidence důkazů
