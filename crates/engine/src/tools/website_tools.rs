@@ -2445,8 +2445,7 @@ document.getElementById('battle').onclick = () => { document.getElementById('bat
         let rows: Value = serde_json::from_str(&std::fs::read_to_string(walk.join("states.json")).unwrap()).unwrap();
         let files: Vec<&str> = rows["states"].as_array().unwrap().iter().filter_map(|s| s["file"].as_str()).collect();
         assert!(files.len() >= 2, "the start view and the screen PLAY reaches: {rows}");
-        let clicks: Vec<Value> =
-            rows["states"].as_array().unwrap().iter().filter_map(|s| (s["action"]["kind"] == "click").then(|| s["action"].clone())).collect();
+        let clicks: Vec<Value> = rows["states"].as_array().unwrap().iter().filter(|s| s["action"]["kind"] == "click").map(|s| s["action"].clone()).collect();
         assert!(!clicks.is_empty(), "PLAY was clicked: {rows}");
         // Replaying the recorded actions walks the same screens again, one picture per step.
         let replay = dir.path().join("replay");
