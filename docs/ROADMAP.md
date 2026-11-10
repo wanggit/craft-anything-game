@@ -954,7 +954,7 @@ the states.
       containers (DXT/ETC crunch — the C++ converter stays as fallback), the ETC/EAC family and
       ASTC, in both the single export and the extract. Cross-checked pixel for pixel against an
       independent decoder's output on a real crunched ETC2A atlas (identical, modulo row order)
-      — claimed: claude, branch feature/r2.13-etc2-textures
+      — claimed: claude, branch feature/r2.13-etc2-textures; PR #19
 - [ ] Sprite-atlas rect resolution (the missing external SpriteAtlas captured with the game) and
       audio out (R3.9's sound line) complete the set
 - [ ] wasm/IL2CPP recovery is tools: `game_il2cpp_map` (metadata names ↔ wasm functions),
