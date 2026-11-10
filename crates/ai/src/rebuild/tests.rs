@@ -446,7 +446,7 @@ mod typed_retries {
         let mut ws = Workspace::create(dir.path(), "x", "Build a thing", TargetRef::None).unwrap();
         let mut worker = check_worker(&ws, false);
         let failure = TurnFailure::new(FailureKind::Transient);
-        let mut agent = FailingConversation::new([Some(failure); 5], false);
+        let mut agent = FailingConversation::new([Some(failure); 7], false);
         let mut waits = Vec::new();
         assert!(
             worker
@@ -456,8 +456,8 @@ mod typed_retries {
                 })
                 .is_err()
         );
-        assert_eq!(agent.sent.len(), 4, "initial attempt and at most three retries");
-        assert_eq!(waits, [30, 60, 90]);
+        assert_eq!(agent.sent.len(), 6, "initial attempt and at most five retries");
+        assert_eq!(waits, [30, 60, 120, 240, 480], "exponential backoff");
         let mut agent = FailingConversation::new([Some(failure)], false);
         let error = worker
             .turn_with_wait(&mut ws, &mut agent, "Build it", None, |stop, _| {
@@ -746,7 +746,7 @@ mod typed_retries {
 
     #[cfg(unix)]
     #[test]
-    fn an_untyped_opencode_exit_keeps_its_error_and_the_three_retry_cap() {
+    fn an_untyped_opencode_exit_keeps_its_error_and_the_retry_cap() {
         let dir = tempfile::tempdir().unwrap();
         let mut ws = Workspace::create(dir.path(), "x", "Build a thing", TargetRef::None).unwrap();
         let mut worker = check_worker(&ws, false);
@@ -765,8 +765,8 @@ mod typed_retries {
         assert!(error.message.contains("Unknown option"), "{error:?}");
         assert_eq!(cli.last_failure().unwrap().kind, FailureKind::Transient);
         assert!(!cli.is_busy());
-        assert_eq!(waits, [2, 2, 2], "the display wait hint affects only the delay after a retryable exit");
-        assert_eq!(std::fs::read_to_string(ws.root.join("attempts")).unwrap(), "attempt\nattempt\nattempt\nattempt\n");
+        assert_eq!(waits, [2, 2, 2, 2, 2], "the display wait hint affects only the delay after a retryable exit");
+        assert_eq!(std::fs::read_to_string(ws.root.join("attempts")).unwrap(), "attempt\nattempt\nattempt\nattempt\nattempt\nattempt\n");
     }
 }
 

@@ -485,8 +485,29 @@ impl AgentAdapter for ClaudeCode {
                         log: None,
                     });
                 } else if v.get("is_error").and_then(Value::as_bool).unwrap_or(false) {
-                    p.failure.get_or_insert(TurnFailure::new(FailureKind::Unknown));
+                    // A provider API error is typed in the stream (R2.13 resilience): the
+                    // service's trouble to retry, 400s included (a flaky provider sent them for
+                    // hours while identical requests succeeded), and a dropped connection too.
                     let why = if s("result").is_empty() { s("subtype") } else { s("result") };
+                    let failure = match v.get("api_error_status").and_then(Value::as_u64) {
+                        Some(401 | 403) => TurnFailure::new(FailureKind::Authentication),
+                        Some(402) => TurnFailure::new(FailureKind::Billing),
+                        Some(429) => TurnFailure::new(FailureKind::RateLimited),
+                        Some(400 | 408 | 500..=599) => TurnFailure::new(FailureKind::Transient),
+                        Some(_) => TurnFailure::new(FailureKind::Configuration),
+                        None => {
+                            let low = why.to_lowercase();
+                            if ["econnreset", "connection to the api", "socket hang up", "connection reset", "temporarily unavailable"]
+                                .iter()
+                                .any(|t| low.contains(t))
+                            {
+                                TurnFailure::new(FailureKind::Transient)
+                            } else {
+                                TurnFailure::new(FailureKind::Unknown)
+                            }
+                        }
+                    };
+                    p.failure.get_or_insert(failure);
                     let (message, remediation) = claude_code_failure_in(&why, self.folder.as_deref());
                     out.push(AgentEvent::Error { message, remediation, log: None });
                 }

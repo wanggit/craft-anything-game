@@ -1144,6 +1144,26 @@ mod tests {
         assert_eq!(p.failure, Some(TurnFailure::new(FailureKind::ToolsUnavailable)));
     }
 
+    /// R2.13: a provider API error is typed in the stream and becomes a retryable failure (a
+    /// flaky provider sent 400s for hours while identical requests succeeded), as does a dropped
+    /// connection; anything else still needs attention.
+    #[test]
+    fn provider_errors_and_dropped_connections_become_retryable() {
+        for (line, kind) in [
+            (r#"{"type":"result","is_error":true,"api_error_status":400,"result":"API Error: 400 Invalid request parameters"}"#, FailureKind::Transient),
+            (r#"{"type":"result","is_error":true,"api_error_status":429,"result":"slow down"}"#, FailureKind::RateLimited),
+            (r#"{"type":"result","is_error":true,"api_error_status":401,"result":"expired"}"#, FailureKind::Authentication),
+            (r#"{"type":"result","is_error":true,"api_error_status":503,"result":"busy"}"#, FailureKind::Transient),
+            (r#"{"type":"result","is_error":true,"result":"API Error: Connection to the API was lost (ECONNRESET)"}"#, FailureKind::Transient),
+            (r#"{"type":"result","is_error":true,"result":"Something else"}"#, FailureKind::Unknown),
+        ] {
+            let mut p = StreamParser::new(adapter_for("claude-code"));
+            p.line(line);
+            assert_eq!(p.failure, Some(TurnFailure::new(kind)), "{line}");
+            assert_eq!(p.failure.unwrap().retryable(), matches!(kind, FailureKind::Transient | FailureKind::RateLimited), "{line}");
+        }
+    }
+
     #[test]
     fn optional_or_pending_mcp_servers_do_not_block_the_builder() {
         for status in ["connected", "pending"] {

@@ -1035,7 +1035,7 @@ impl Worker {
                 // A missing session can only start fresh above, never resume. Only backend
                 // Error events become ProgramFailed here; a simultaneous backend failure must
                 // not make an inbox or workspace write failure retryable.
-                Err(e) if !lost && e.code == ErrorCode::ProgramFailed && tries < 3 && agent.last_failure().is_some_and(crate::TurnFailure::retryable) => {
+                Err(e) if !lost && e.code == ErrorCode::ProgramFailed && tries < 5 && agent.last_failure().is_some_and(crate::TurnFailure::retryable) => {
                     tries += 1;
                     let why = e.message.chars().take(160).collect::<String>();
                     // Typed status decides whether to retry. A display-only wait remains a
@@ -1049,7 +1049,9 @@ impl Worker {
                         }
                         None => {
                             self.step(ws, Step::Build, Status::Building, &format!("The builder stopped ({why}). Picking up where it left off…"))?;
-                            30 * tries
+                            // Exponential backoff: a flaky provider window ran longer than
+                            // three linear attempts (R2.13 resilience).
+                            30u64 << tries.saturating_sub(1).min(4)
                         }
                     };
                     wait_for(&self.stop, seconds)?;
