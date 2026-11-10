@@ -975,7 +975,7 @@ the states.
       state references → implement from the numbers → verify per state; no builder-built analysis
       tooling (the tools above exist), and an analysis budget — a question that needs more than
       a few tool calls becomes an unknown and the build goes on
-      — claimed: claude, branch feature/r2.13-staged-brief
+      — claimed: claude, branch feature/r2.13-staged-brief; PR #24
 - [ ] A new builder session per stage (a 14 MB session 400'd the provider twice): the run
       restarts the conversation at each stage boundary from the brief, what's in app/ and the
       kept replies — the handoff path already starts fresh from the project
