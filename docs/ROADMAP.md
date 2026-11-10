@@ -950,8 +950,11 @@ the states.
       the one command that builds it when it's missing): builders keep rebuilding it from source,
       hours per game
       — claimed: claude, branch feature/r2.13-unity-codec; PR #18
-- [ ] ETC2 texture decode joins it (a Rust decoder or the converter kit extended): the plain
-      ETC2 family is the other format the games actually ship
+- [x] Texture decode completes in pure Rust (the texture2ddecoder crate): the crunched
+      containers (DXT/ETC crunch — the C++ converter stays as fallback), the ETC/EAC family and
+      ASTC, in both the single export and the extract. Cross-checked pixel for pixel against an
+      independent decoder's output on a real crunched ETC2A atlas (identical, modulo row order)
+      — claimed: claude, branch feature/r2.13-etc2-textures; PR #19
 - [ ] Sprite-atlas rect resolution (the missing external SpriteAtlas captured with the game) and
       audio out (R3.9's sound line) complete the set
 - [ ] wasm/IL2CPP recovery is tools: `game_il2cpp_map` (metadata names ↔ wasm functions),
