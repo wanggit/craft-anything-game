@@ -888,8 +888,15 @@ fn game_unity_asset_export(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutpu
         // A crunched texture keeps a CRN stream in its data: the converter (R2.13) turns it back
         // into the plain blocks the decoder reads.
         None => {
-            let crn = t.inline.and_then(|(start, len)| bytes.get(start..start + len)).unwrap_or_default();
-            codec_crunched(&ctx.session.settings, crn).map_err(|why| ToolError::unsupported(format!("{} is a {format} texture: {why}", t.name)))?
+            let inline = t.inline.and_then(|(start, len)| bytes.get(start..start + len)).unwrap_or_default();
+            // Pure Rust first (R2.13: crunched containers and the ETC/ASTC families), then the
+            // unity-codec converter for a crunch stream it couldn't read.
+            match unity_texture::decode_extended(t.format, t.width, t.height, inline) {
+                Ok(rgba) => (t.width, t.height, rgba),
+                Err(_) => {
+                    codec_crunched(&ctx.session.settings, inline).map_err(|why| ToolError::unsupported(format!("{} is a {format} texture: {why}", t.name)))?
+                }
+            }
         }
         Some(need) => {
             let pixels = match (&t.inline, &t.stream) {
@@ -1057,8 +1064,11 @@ fn extract_serialized(ctx: &Ctx<'_>, src: &mut Serialized, label: &str, out: &Pa
                 // A crunched texture keeps a CRN stream in its data: the converter (R2.13) turns
                 // it back into the plain blocks the decoder reads.
                 None => {
-                    let crn = t.inline.and_then(|(start, len)| bytes.get(start..start + len)).unwrap_or_default();
-                    codec_crunched(&ctx.session.settings, crn)?
+                    let inline = t.inline.and_then(|(start, len)| bytes.get(start..start + len)).unwrap_or_default();
+                    match unity_texture::decode_extended(t.format, t.width, t.height, inline) {
+                        Ok(rgba) => (t.width, t.height, rgba),
+                        Err(_) => codec_crunched(&ctx.session.settings, inline)?,
+                    }
                 }
                 Some(need) => {
                     let pixels = match (&t.inline, &t.stream) {

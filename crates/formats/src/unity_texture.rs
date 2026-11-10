@@ -147,8 +147,24 @@ const FORMATS: &[(i32, &str)] = &[
     (27, "BC5"),
     (28, "DXT1Crunched"),
     (29, "DXT5Crunched"),
+    (34, "ETC_RGB4"),
+    (41, "EAC_R"),
+    (42, "EAC_R_SIGNED"),
+    (43, "EAC_RG"),
+    (44, "EAC_RG_SIGNED"),
+    (45, "ETC2_RGB"),
+    (46, "ETC2_RGBA1"),
+    (47, "ETC2_RGBA8"),
+    (48, "ASTC_4x4"),
+    (49, "ASTC_5x5"),
+    (50, "ASTC_6x6"),
+    (51, "ASTC_8x8"),
+    (52, "ASTC_10x10"),
+    (53, "ASTC_12x12"),
     (62, "RG16"),
     (63, "R8"),
+    (64, "ETC_RGB4Crunched"),
+    (65, "ETC2_RGBA8Crunched"),
 ];
 
 /// A pixel format's name, or `format <id>`.
@@ -188,6 +204,52 @@ pub fn decode(format: i32, width: u32, height: u32, data: &[u8]) -> Result<Vec<u
     let layout = layout(format).ok_or_else(|| FormatError::Unsupported(format!("{} textures", format_name(format))))?;
     // Stored bottom row first; pictures are read top row first.
     Ok(pixels::flip_rows(&pixels::decode(layout, width, height, data)?, width))
+}
+
+/// The formats `decode` doesn't read, decoded through the pure-Rust texture2ddecoder (R2.13):
+/// the crunched containers (whatever their base format, the bytes are one Unity crunch stream)
+/// and the ETC/EAC/ASTC block families. Rows come out top first, like `decode`.
+pub fn decode_extended(format: i32, width: u32, height: u32, data: &[u8]) -> Result<Vec<u8>, FormatError> {
+    let unsupported = || FormatError::Unsupported(format!("{} textures", format_name(format)));
+    let w = usize::try_from(width).map_err(|_| unsupported())?;
+    let h = usize::try_from(height).map_err(|_| unsupported())?;
+    let px = w.checked_mul(h).ok_or_else(unsupported)?;
+    if px == 0 || px > 8192 * 8192 {
+        return Err(unsupported());
+    }
+    let mut image = vec![0u32; px];
+    let run: Result<(), &str> = match format {
+        28 | 29 | 64 | 65 => texture2ddecoder::decode_unity_crunch(data, w, h, &mut image),
+        34 => texture2ddecoder::decode_etc1(data, w, h, &mut image),
+        45 => texture2ddecoder::decode_etc2_rgb(data, w, h, &mut image),
+        46 => texture2ddecoder::decode_etc2_rgba1(data, w, h, &mut image),
+        47 => texture2ddecoder::decode_etc2_rgba8(data, w, h, &mut image),
+        41 => texture2ddecoder::decode_eacr(data, w, h, &mut image),
+        42 => texture2ddecoder::decode_eacr_signed(data, w, h, &mut image),
+        43 => texture2ddecoder::decode_eacrg(data, w, h, &mut image),
+        44 => texture2ddecoder::decode_eacrg_signed(data, w, h, &mut image),
+        48..=53 => {
+            let (bw, bh) = match format {
+                48 => (4, 4),
+                49 => (5, 5),
+                50 => (6, 6),
+                51 => (8, 8),
+                52 => (10, 10),
+                _ => (12, 12),
+            };
+            texture2ddecoder::decode_astc(data, w, h, bw, bh, &mut image)
+        }
+        _ => return Err(unsupported()),
+    };
+    run.map_err(|why| FormatError::Unsupported(format!("{} textures: {why}", format_name(format))))?;
+    let mut rgba = Vec::with_capacity(px * 4);
+    for p in image {
+        // texture2ddecoder packs `u32::from_le_bytes([b, g, r, a])`.
+        let [b, g, r, a] = p.to_le_bytes();
+        rgba.extend_from_slice(&[r, g, b, a]);
+    }
+    // Stored bottom row first; pictures are read top row first, like `decode`.
+    Ok(pixels::flip_rows(&rgba, width))
 }
 
 #[cfg(test)]
@@ -241,5 +303,25 @@ mod tests {
         assert!(decode(24, 4, 4, &[0b11111, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]).unwrap().as_chunks::<4>().0.iter().all(|p| *p == [0, 0, 0, 255]));
         assert!(matches!(decode(28, 4, 4, &[0; 16]), Err(FormatError::Unsupported(m)) if m.contains("DXT1Crunched")));
         assert!(matches!(decode(4, 2, 2, &[0; 15]), Err(FormatError::Truncated(_))));
+    }
+
+    /// R2.13: the extended families decode through texture2ddecoder — routing, honest errors
+    /// naming the format, and the full-size RGBA output. (Pixel truth is cross-checked against
+    /// an independent decoder on a real crunched atlas: identical modulo row order.)
+    #[test]
+    fn decodes_the_extended_families() {
+        // A family format with garbage bytes fails naming the format, never a silent picture.
+        assert!(matches!(decode_extended(47, 4, 4, &[0; 15]), Err(FormatError::Unsupported(m)) if m.contains("ETC2_RGBA8")));
+        assert!(
+            matches!(decode_extended(200, 4, 4, &[0; 64]), Err(FormatError::Unsupported(m)) if m.contains("format 200")),
+            "a format with no decoder at all"
+        );
+        // ETC2 RGB on zeroed blocks still yields the full-size picture as RGBA bytes.
+        let px = decode_extended(45, 8, 4, &[0; 16]).unwrap();
+        assert_eq!(px.len(), 8 * 4 * 4);
+        // A crunched container on garbage errors rather than guessing (the tool keeps the raw).
+        assert!(decode_extended(65, 4, 4, &[0; 64]).is_err());
+        // The families name themselves now (they used to be unnamed `format <id>`).
+        assert_eq!(format_name(65), "ETC2_RGBA8Crunched");
     }
 }
