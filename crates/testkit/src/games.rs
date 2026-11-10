@@ -618,6 +618,7 @@ pub fn il2cpp_metadata(s: &Il2cppSample) -> Vec<u8> {
     let game = name("Game");
     let types_named = [(name("<Module>"), empty), (name("Enemy"), game), (name("Player"), game)];
     let methods_named = [name("Update"), name(".ctor"), name("Update"), name("TakeDamage")];
+    let fields_named = [name("health"), name("speed"), name("playerName"), name("health"), name("armor"), name("score"), name("level")];
 
     let put = |rec: &mut [u8], at: usize, v: u32| rec[at..at + 4].copy_from_slice(&v.to_le_bytes());
     let put16 = |rec: &mut [u8], at: usize, v: u16| rec[at..at + 2].copy_from_slice(&v.to_le_bytes());
@@ -645,16 +646,27 @@ pub fn il2cpp_metadata(s: &Il2cppSample) -> Vec<u8> {
     // Offsets in a type record: a later 24.x type also has its by-reference type index.
     let older = usize::from(s.type_size == 92) * 4;
     let mut types = Vec::new();
-    for (i, (start, count, fields, flags)) in [(-1i32, 0u16, 0u16, 0u32), (0, 1, 2, 1), (1, 3, 5, 0x0010_0001)].iter().enumerate() {
+    for (i, (start, count, fields, field_start, flags)) in [(-1i32, 0u16, 0u16, 0i32, 0u32), (0, 1, 2, 0, 1), (1, 3, 5, 2, 0x0010_0001)].iter().enumerate() {
         let mut rec = vec![0u8; s.type_size];
         put(&mut rec, 0, types_named[i].0);
         put(&mut rec, 4, types_named[i].1);
         put(&mut rec, 28 + older, *flags);
+        put(&mut rec, 32 + older, *field_start as u32);
         put(&mut rec, 36 + older, *start as u32);
         put16(&mut rec, 64 + older, *count);
         put16(&mut rec, 68 + older, *fields);
         put(&mut rec, 84 + older, 0x0200_0001 + i as u32);
         types.extend_from_slice(&rec);
+    }
+
+    // Fields in declaration order: name, type index (into the game's own registry), token.
+    let mut fields = Vec::new();
+    for (i, named) in fields_named.iter().enumerate() {
+        let mut rec = vec![0u8; 12];
+        put(&mut rec, 0, *named);
+        put(&mut rec, 4, i as u32);
+        put(&mut rec, 8, 0x0400_0001 + i as u32);
+        fields.extend_from_slice(&rec);
     }
 
     let mut images = Vec::new();
@@ -671,7 +683,8 @@ pub fn il2cpp_metadata(s: &Il2cppSample) -> Vec<u8> {
     let assemblies = vec![0u8; 136];
 
     // The header's sections, in its order; those not read here stay empty.
-    let parts: [(usize, &[u8]); 7] = [(0, &literals), (1, &literal_data), (2, &strings), (5, &methods), (19, &types), (20, &images), (21, &assemblies)];
+    let parts: [(usize, &[u8]); 8] =
+        [(0, &literals), (1, &literal_data), (2, &strings), (5, &methods), (11, &fields), (19, &types), (20, &images), (21, &assemblies)];
     let mut out = vec![0u8; s.header_size as usize];
     out[0..4].copy_from_slice(&0xFAB1_1BAFu32.to_le_bytes());
     out[4..8].copy_from_slice(&s.version.to_le_bytes());

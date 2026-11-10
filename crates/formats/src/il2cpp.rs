@@ -45,6 +45,8 @@ const SECTIONS: [&str; 22] = [
     "assemblies",
 ];
 const LITERALS: usize = 0;
+const FIELDS: usize = 11;
+const FIELD_RECORD: usize = 12;
 const LITERAL_DATA: usize = 1;
 const STRINGS: usize = 2;
 const METHODS: usize = 5;
@@ -61,6 +63,7 @@ pub struct Layout {
     type_method_start: usize,
     type_method_count: usize,
     type_field_count: usize,
+    type_field_start: usize,
     type_token: usize,
     method_size: usize,
     method_type: usize,
@@ -81,6 +84,7 @@ const fn modern(version: i32, method_size: usize) -> Layout {
         type_method_start: 36,
         type_method_count: 64,
         type_field_count: 68,
+        type_field_start: 32,
         type_token: 84,
         method_size,
         method_type: 4,
@@ -101,6 +105,7 @@ pub const LAYOUTS: &[Layout] = &[
         type_method_start: 40,
         type_method_count: 68,
         type_field_count: 72,
+        type_field_start: 36,
         type_token: 88,
         method_size: 32,
         method_type: 4,
@@ -171,6 +176,7 @@ pub struct Type {
     pub name: String,
     pub method_start: i32,
     pub method_count: u16,
+    pub field_start: i32,
     pub field_count: u16,
     pub flags: u32,
     pub token: u32,
@@ -180,6 +186,17 @@ impl Type {
     pub fn full_name(&self) -> String {
         if self.namespace.is_empty() { self.name.clone() } else { format!("{}.{}", self.namespace, self.name) }
     }
+}
+
+/// One field of a type: its name and its type index into the game's binary type registry (the
+/// metadata carries no type names; the game's binary does). Declaration order is the order a
+/// serialized object stores the fields in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Field {
+    pub index: usize,
+    pub name: String,
+    pub type_index: i32,
+    pub token: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -360,6 +377,7 @@ impl<'a> Metadata<'a> {
             namespace: self.string(r.u32_le(4)?),
             method_start: r.u32_le(l.type_method_start)? as i32,
             method_count: r.u16_le(l.type_method_count)?,
+            field_start: r.u32_le(l.type_field_start)? as i32,
             field_count: r.u16_le(l.type_field_count)?,
             flags: r.u32_le(l.type_flags)?,
             token: r.u32_le(l.type_token)?,
@@ -377,6 +395,19 @@ impl<'a> Metadata<'a> {
             flags: r.u16_le(l.method_flags)?,
             token: r.u32_le(l.method_token)?,
         })
+    }
+
+    /// One field by its field index.
+    pub fn field(&self, index: usize) -> Option<Field> {
+        let r = self.record(FIELDS, FIELD_RECORD, index)?;
+        Some(Field { index, name: self.string(r.u32_le(0)?), type_index: r.u32_le(4)? as i32, token: r.u32_le(8)? })
+    }
+
+    /// The fields a type declares, in declaration order — the order a serialized object stores
+    /// them in (R2.13: the names a mechanics sheet cites and the layout a value walk follows).
+    pub fn fields(&self, type_index: usize) -> Vec<Field> {
+        let Some(t) = self.type_def(type_index) else { return Vec::new() };
+        (0..t.field_count).filter_map(|i| self.field(t.field_start as usize + i as usize)).collect()
     }
 
     /// A string literal, at most `max_bytes` of it. `None` when its record or bytes lie outside.
@@ -412,6 +443,26 @@ fn looks_like_name(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// R2.13: a type's fields come back by name in declaration order — the order a serialized
+    /// object stores them in, and the names a mechanics sheet cites.
+    #[test]
+    fn reads_a_types_fields_in_declaration_order() {
+        let sample = craft_anything_testkit::games::il2cpp_metadata(&craft_anything_testkit::games::Il2cppSample {
+            version: 31,
+            header_size: 256,
+            type_size: 88,
+            method_size: 36,
+        });
+        let Reading::Readable(m) = read(&sample) else { panic!("the fixture is readable") };
+        let player = m.fields(2);
+        assert_eq!(player.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), ["playerName", "health", "armor", "score", "level"]);
+        assert_eq!(player[0].index, 2, "the field index space is the whole file's");
+        let enemy = m.fields(1);
+        assert_eq!(enemy.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), ["health", "speed"]);
+        assert!(m.fields(0).is_empty(), "a type that declares none");
+        assert!(m.fields(99).is_empty(), "a type outside the file");
+    }
     use craft_anything_testkit::games::{Il2cppSample, il2cpp_metadata};
 
     fn sample(version: i32, method_size: usize) -> Vec<u8> {

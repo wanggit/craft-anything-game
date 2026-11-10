@@ -962,9 +962,15 @@ the states.
       resolved to function names, picked by name — the workflow that had builders writing their
       own wasm-fn.py against 87k-function modules
       — claimed: claude, branch feature/r2.13-wasm-function; PR #20
-- [ ] `game_config_dump` reads a MonoBehaviour's serialized fields by its metadata type layout
-      (the values a mechanics sheet cites), and the MECHANICS.md contract check (values cite
-      functions or addresses, estimates labelled) extends to web games
+- [x] The metadata's fields are readable: every type's field names in declaration order — the
+      names a mechanics sheet cites and the layout a value walk follows (the parser knew counts
+      only; builders wrote their own dump-metadata.py). The fields view names each field with
+      the type that declares it and its type index; default values join later with the value
+      walk — claimed: claude, branch feature/r2.13-game-config; PR #21
+- [ ] `game_config_dump` walks a MonoBehaviour's serialized fields to values (the field types
+      live in the game's binary, not the metadata: a types map the reader supplies, honest
+      about what it guesses), and the MECHANICS.md contract check (values cite functions or
+      addresses, estimates labelled) extends to web games
 - [ ] The brief is staged and bounded: extract assets → recover mechanics → build UI against the
       state references → implement from the numbers → verify per state; no builder-built analysis
       tooling (the tools above exist), an analysis budget, and a new session per stage (a 14 MB
