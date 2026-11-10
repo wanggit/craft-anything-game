@@ -980,7 +980,7 @@ the states.
       every asset in the build is the game's own or named in app/stand-ins.json (kind: original
       fetched from the game's server, or stand-in) — an asset-like file that is neither fails
       the claims, and the note counts the stand-ins the person is looking at
-      — claimed: claude, branch feature/r2.13-stand-ins
+      — claimed: claude, branch feature/r2.13-stand-ins; PR #22
 - [ ] Run resilience: 400s and dropped connections retry with backoff and resume the agent
       session on their own (two attempts gave up mid-outage today), and a resume prompt travels
       as an argument (stdin came out empty and the turn ran with no prompt at all)
