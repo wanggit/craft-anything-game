@@ -457,6 +457,7 @@ pub const ENGINES: &[ExternalEngine] = &[
         install: Install::Manual,
     },
     manual(crate::camoufox::ID, "Camoufox", "Studying websites that block automated browsers", &["camoufox"], &["camoufox.exe", "camoufox.cmd"]),
+    manual(crate::unity_codec::ID, "Unity texture codec", "Decoding Unity's crunched textures", &["crn2blocks"], &["crn2blocks.exe"]),
     manual("frida", "Frida", "Tracing apps while they run", &["frida"], &["frida.exe"]),
     manual("gdb", "GDB", "Debugging native programs", &["gdb"], &["gdb.exe"]),
     manual("lldb", "LLDB", "Debugging Apple apps", &["lldb"], &["lldb.exe"]),

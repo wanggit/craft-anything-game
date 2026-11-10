@@ -944,9 +944,14 @@ the states.
       audio clip), and write a manifest.json that names everything with its source, size and any
       reason it was skipped instead of dropping it silently
       — claimed: claude, branch feature/r2.13-assets-extract; PR #17
-- [ ] Crunch and ETC2 texture decode ship with the extract (an engines-wrapped converter
-      installed once, or a Rust decoder): builders keep rebuilding them from source, hours per
-      game (R3.9's crunched-texture line is the same gap)
+- [x] Crunch texture decode ships as an engines-wrapped converter (unitycodec: our own crn2blocks
+      glue, built against Unity's open-source crunch fork by a one-time build script the engine
+      store holds; the extract and the single export decode crunched formats through it, and say
+      the one command that builds it when it's missing): builders keep rebuilding it from source,
+      hours per game
+      — claimed: claude, branch feature/r2.13-unity-codec; PR #18
+- [ ] ETC2 texture decode joins it (a Rust decoder or the converter kit extended): the plain
+      ETC2 family is the other format the games actually ship
 - [ ] Sprite-atlas rect resolution (the missing external SpriteAtlas captured with the game) and
       audio out (R3.9's sound line) complete the set
 - [ ] wasm/IL2CPP recovery is tools: `game_il2cpp_map` (metadata names ↔ wasm functions),
