@@ -739,10 +739,26 @@ fn codec_crunched(settings: &crate::settings::Settings, crn: &[u8]) -> Result<(u
     let _ = std::fs::remove_dir_all(&work);
     let blocks = run?;
     // The converter's DXT format (0 = DXT1, 2 = DXT5) is the plain format the blocks are in.
+    // The converter's format numbers are the crunch fork's (crnlib.h): 0 = DXT1, 2 = DXT5 are
+    // the blocks the existing decoder reads. The ETC family (10..=13) needs the ETC2 decoder
+    // that ships separately (R2.13); the swizzled DXT5 variants keep their channel order.
     let format = match blocks.dxt_format {
         0 => 10,
         2 => 12,
-        other => return Err(format!("CRN DXT format {other} isn't decoded here")),
+        other => {
+            let name = match other {
+                1 => "DXT3",
+                3..=6 => "a swizzled DXT5",
+                7 | 8 => "DXN",
+                9 => "DXT5A",
+                10 => "ETC1",
+                11 => "ETC2",
+                12 => "ETC2A",
+                13 => "ETC1S",
+                _ => "an unknown crunch format",
+            };
+            return Err(format!("this crunched texture is {name} ({other}), which isn't decoded here yet"));
+        }
     };
     let rgba = unity_texture::decode(format, blocks.width, blocks.height, &blocks.blocks).map_err(|e| e.to_string())?;
     Ok((blocks.width, blocks.height, rgba))

@@ -43,7 +43,7 @@ patch("crnlib/crn_vector.cpp",
       "math::is_power_of_2((uint32)new_capacity)", must=False)
 patch("crnlib/crn_vector.cpp",
       "new_capacity = math::next_pow2(new_capacity);",
-      "new_capacity = math::next_pow2((uint32)new_capacity)", must=False)
+      "new_capacity = math::next_pow2((uint32)new_capacity);", must=False)
 EOF
 
 CXX="${CXX:-c++}"
