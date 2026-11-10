@@ -937,7 +937,7 @@ the states.
       (picture likeness), and claims hold the build to every recorded state having a match — a
       boot-screen 100% no longer carries a game (claims at a 50% floor — the finish bar waits
       for measurement)
-      — claimed: claude, branch feature/r2.13-play-states
+      — claimed: claude, branch feature/r2.13-play-states; PR #16
 - [ ] The asset pipeline is tools, not builder scripts (extends R3.9): crunch/ETC2/DXT texture
       decode and export, sprite-atlas rect resolution (the missing external SpriteAtlas captured
       with the game), audio out — one `game_assets_extract` fills app/Original/ with a source
