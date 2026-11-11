@@ -333,12 +333,94 @@ pub struct Clip {
     pub height: f64,
 }
 
+/// How many times a page load is tried when the network drops the attempt (the first try and
+/// its retries). A reset seconds into loading is the network's hiccup, not the page's refusal:
+/// live runs show the same address loading on the next try (poki.com, 2026-11-11).
+const LOAD_TRIES: u32 = 3;
+/// How long to wait between load tries, in milliseconds.
+const LOAD_RETRY_WAIT_MS: u64 = 4_000;
+
+/// True when the browser's own words say the connection was dropped while the page loaded — a
+/// failure that usually passes on the next try. The spelling is read once here, at the boundary
+/// where the browser's text enters; everything downstream decides on the typed flag
+/// [`load_failure`] sets, never on message wording.
+pub fn net_dropped(text: &str) -> bool {
+    const TOKENS: &[&str] = &[
+        // Firefox (Camoufox) and the system's socket words.
+        "NS_ERROR_NET_RESET",
+        "NS_ERROR_NET_TIMEOUT",
+        "NS_ERROR_NET_INTERRUPT",
+        "NS_ERROR_NET_EOF",
+        "NS_ERROR_CONNECTION_REFUSED",
+        "NS_ERROR_CONNECTION_TIMED_OUT",
+        "Connection reset",
+        "Connection refused",
+        "Connection timed out",
+        "ECONNRESET",
+        // Chromium's network-error spellings (CDP's `errorText`).
+        "net::ERR_CONNECTION_RESET",
+        "net::ERR_CONNECTION_CLOSED",
+        "net::ERR_CONNECTION_TIMED_OUT",
+        "net::ERR_CONNECTION_REFUSED",
+        "net::ERR_TIMED_OUT",
+        "net::ERR_NETWORK_CHANGED",
+    ];
+    let lower = text.to_ascii_lowercase();
+    TOKENS.iter().any(|t| lower.contains(&t.to_ascii_lowercase()))
+}
+
+/// The browser's words for a page that didn't load, as the error for the person. A dropped
+/// connection is marked in the typed details (`net_dropped`), so [`PageConn::navigate`] can try
+/// again and the remediation can name the connection rather than the browser install.
+pub fn load_failure(raw: &str) -> ToolError {
+    let message = format!("the page didn't load: {}", raw.trim());
+    if net_dropped(raw) {
+        ToolError::new(ErrorCode::ProgramFailed, message)
+            .with_remediation("The connection was dropped while the page loaded. Check this computer's internet connection (and any VPN or firewall between it and the site), then try again.")
+            .with_details(json!({"net_dropped": true}))
+    } else {
+        ToolError::new(ErrorCode::ProgramFailed, message).with_remediation("Check the address and your internet connection, then try again.")
+    }
+}
+
+/// Whether the load failed on a dropped connection ([`load_failure`]'s typed flag).
+fn net_dropped_flag(e: &ToolError) -> bool {
+    e.details.as_ref().and_then(|d| d.get("net_dropped")).and_then(Value::as_bool).unwrap_or(false)
+}
+
 /// One page in a running browser — everything the website tools do to it. A CDP page is a
 /// Chromium's; a Camoufox page answers the same moves through its Playwright helper.
 pub trait PageConn {
-    /// Open `url` and wait for it to settle; returns what went wrong while it loaded
-    /// ([`super::website_tools::page_health`]).
-    fn navigate(&mut self, url: &str, width: u32, height: u32, settle_ms: u64, dl: &Deadline) -> Result<Value, ToolError>;
+    /// One try at opening `url` and waiting for it to settle; returns what went wrong while it
+    /// loaded ([`super::website_tools::page_health`]).
+    fn navigate_once(&mut self, url: &str, width: u32, height: u32, settle_ms: u64, dl: &Deadline) -> Result<Value, ToolError>;
+
+    /// Open `url` and wait for it to settle. A load the network dropped is tried again after a
+    /// pause ([`load_failure`]): a reset seconds into loading is the network's hiccup, not the
+    /// page's refusal, and live runs show the same address loading on the next try. A page that
+    /// needed the retries says so — the returned page health carries `load_retries`.
+    fn navigate(&mut self, url: &str, width: u32, height: u32, settle_ms: u64, dl: &Deadline) -> Result<Value, ToolError> {
+        let mut tries: u32 = 1;
+        loop {
+            match self.navigate_once(url, width, height, settle_ms, dl) {
+                Ok(mut health) => {
+                    if tries > 1
+                        && let Some(h) = health.as_object_mut()
+                    {
+                        h.insert("load_retries".into(), json!(tries - 1));
+                    }
+                    return Ok(health);
+                }
+                Err(e) if tries < LOAD_TRIES && net_dropped_flag(&e) && !dl.expired() => {
+                    tries += 1;
+                    // Wait out the hiccup through the connection itself (a test's stand-in
+                    // doesn't sleep); if the browser died meanwhile, the next try says so.
+                    let _ = self.settle(LOAD_RETRY_WAIT_MS, dl);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
     /// Evaluate one of our own read-only scripts in the page and return its JSON value.
     fn eval(&mut self, script: &str, dl: &Deadline) -> Result<Value, ToolError>;
     /// A PNG of the page: the whole page cut to `clip` (page coordinates), or of the current
@@ -394,7 +476,7 @@ pub fn backend_env(clean_room: bool, info: &BackendInfo) -> Environment {
 struct CdpConn(CdpClient);
 
 impl PageConn for CdpConn {
-    fn navigate(&mut self, url: &str, width: u32, height: u32, settle_ms: u64, dl: &Deadline) -> Result<Value, ToolError> {
+    fn navigate_once(&mut self, url: &str, width: u32, height: u32, settle_ms: u64, dl: &Deadline) -> Result<Value, ToolError> {
         self.0.call("Page.enable", json!({}), None, dl)?;
         // Errors and failed requests are read from the browser's own events; a browser that
         // refuses one of these still loads the page.
@@ -404,8 +486,7 @@ impl PageConn for CdpConn {
         self.set_viewport(width, height, dl)?;
         let r = self.0.call("Page.navigate", json!({"url": url}), None, dl)?;
         if let Some(err) = r.get("errorText").and_then(Value::as_str).filter(|s| !s.is_empty()) {
-            return Err(ToolError::new(ErrorCode::ProgramFailed, format!("the page didn't load: {err}"))
-                .with_remediation("Check the address and your internet connection, then try again."));
+            return Err(load_failure(err));
         }
         // Wait for the load event (bounded by the overall deadline), then let late content settle.
         let loaded = Deadline::new(Duration::from_secs(45), crate::tool::CancelToken::default());
@@ -542,10 +623,13 @@ impl CamoufoxConn {
 }
 
 impl PageConn for CamoufoxConn {
-    fn navigate(&mut self, url: &str, width: u32, height: u32, settle_ms: u64, dl: &Deadline) -> Result<Value, ToolError> {
+    fn navigate_once(&mut self, url: &str, width: u32, height: u32, settle_ms: u64, dl: &Deadline) -> Result<Value, ToolError> {
         self.with_helper("camoufox-navigate", |h| {
             h.viewport(width, height, dl)?;
-            let (_loaded, events) = h.goto(url, settle_ms, dl)?;
+            let (_loaded, events, load_error) = h.goto(url, settle_ms, dl)?;
+            if let Some(raw) = load_error {
+                return Err(load_failure(&raw));
+            }
             Ok(super::website_tools::page_health(&events))
         })
     }
@@ -1794,8 +1878,114 @@ mod tests {
         assert!(!headed.contains(&"--enable-unsafe-swiftshader".to_string()), "{headed:?}");
     }
 
+    /// A page whose load attempts are scripted, for the retry policy. Its `settle` returns at
+    /// once, so the policy's waits cost the tests nothing.
+    struct ScriptedConn {
+        attempts: std::collections::VecDeque<Result<Value, ToolError>>,
+        calls: usize,
+    }
+
+    impl PageConn for ScriptedConn {
+        fn navigate_once(&mut self, _url: &str, _width: u32, _height: u32, _settle_ms: u64, _dl: &Deadline) -> Result<Value, ToolError> {
+            self.calls += 1;
+            self.attempts.pop_front().unwrap_or_else(|| Err(ToolError::internal("no scripted outcome left")))
+        }
+        fn eval(&mut self, _script: &str, _dl: &Deadline) -> Result<Value, ToolError> {
+            Ok(Value::Null)
+        }
+        fn screenshot(&mut self, _clip: Option<Clip>, _dl: &Deadline) -> Result<Vec<u8>, ToolError> {
+            Ok(Vec::new())
+        }
+        fn set_viewport(&mut self, _width: u32, _height: u32, _dl: &Deadline) -> Result<(), ToolError> {
+            Ok(())
+        }
+        fn press_escape(&mut self, _dl: &Deadline) {}
+        fn settle(&mut self, _ms: u64, _dl: &Deadline) -> Result<(), ToolError> {
+            Ok(())
+        }
+        fn finish(&mut self, _dl: &Deadline) {}
+    }
+
+    fn scripted(outcomes: Vec<Result<Value, ToolError>>) -> ScriptedConn {
+        ScriptedConn { attempts: outcomes.into(), calls: 0 }
+    }
+
+    fn test_dl() -> Deadline {
+        Deadline::new(Duration::from_secs(30), crate::tool::CancelToken::default())
+    }
+
+    /// A dropped connection is tried again, and a page that opens on the retry says so.
+    #[test]
+    fn a_dropped_load_is_tried_again_and_says_so() {
+        let mut conn = scripted(vec![Err(load_failure("net::ERR_CONNECTION_RESET")), Ok(json!({"errors": []}))]);
+        let health = conn.navigate("https://example.test/", 1440, 900, 0, &test_dl()).unwrap();
+        assert_eq!(conn.calls, 2, "the drop and its retry");
+        assert_eq!(health["load_retries"], 1);
+    }
+
+    /// A page that loads first try carries no retry note.
+    #[test]
+    fn a_page_that_loads_first_try_has_no_retry_note() {
+        let mut conn = scripted(vec![Ok(json!({"errors": []}))]);
+        let health = conn.navigate("https://example.test/", 1440, 900, 0, &test_dl()).unwrap();
+        assert_eq!(conn.calls, 1);
+        assert!(health.get("load_retries").is_none(), "{health}");
+    }
+
+    /// A drop that never passes fails after the bounded tries, in the browser's own words, with
+    /// the typed flag that marked it.
+    #[test]
+    fn a_drop_that_never_passes_stays_bounded_and_honest() {
+        let mut conn = scripted(vec![
+            Err(load_failure("Page.goto: NS_ERROR_NET_RESET")),
+            Err(load_failure("Page.goto: NS_ERROR_NET_RESET")),
+            Err(load_failure("Page.goto: NS_ERROR_NET_RESET")),
+            Ok(json!({})),
+        ]);
+        let err = conn.navigate("https://example.test/", 1440, 900, 0, &test_dl()).unwrap_err();
+        assert_eq!(conn.calls, 3, "the first try and its retries, then stop");
+        assert!(err.message.contains("NS_ERROR_NET_RESET"), "{}", err.message);
+        assert!(net_dropped_flag(&err), "the drop is typed, not read back off the words");
+    }
+
+    /// A failure that isn't a dropped connection is final after one try (a missing host won't
+    /// appear by asking again).
+    #[test]
+    fn a_load_that_fails_for_another_reason_is_not_tried_again() {
+        let mut conn = scripted(vec![Err(load_failure("net::ERR_NAME_NOT_RESOLVED"))]);
+        let err = conn.navigate("https://example.test/", 1440, 900, 0, &test_dl()).unwrap_err();
+        assert_eq!(conn.calls, 1);
+        assert!(!net_dropped_flag(&err));
+    }
+
+    /// The dropped-connection spelling is read once, at the boundary where the browser's words
+    /// enter; everything downstream decides on the typed flag.
+    #[test]
+    fn a_dropped_connection_is_typed_once_at_the_boundary() {
+        for text in [
+            "Page.goto: NS_ERROR_NET_RESET\nCall log:\n  - navigating to …",
+            "net::ERR_CONNECTION_RESET",
+            "net::ERR_NETWORK_CHANGED",
+            "Connection reset by peer",
+            "ECONNRESET",
+            "NS_ERROR_CONNECTION_TIMED_OUT",
+        ] {
+            let e = load_failure(text);
+            assert!(net_dropped(text) && net_dropped_flag(&e), "{text}");
+            assert!(e.remediation.is_some_and(|r| r.contains("connection was dropped")), "{text}");
+        }
+        for text in ["net::ERR_NAME_NOT_RESOLVED", "NS_ERROR_FILE_NOT_FOUND", "TypeError: x is undefined", "the certificate is not trusted"] {
+            let e = load_failure(text);
+            assert!(!net_dropped(text) && !net_dropped_flag(&e), "{text}");
+            assert!(e.remediation.is_some_and(|r| r.contains("Check the address")), "{text}");
+        }
+        assert!(load_failure(" net::ERR_CONNECTION_RESET ").message.starts_with("the page didn't load: net::ERR_CONNECTION_RESET"));
+    }
+
     /// A flow through the website tools on the Camoufox backend, with a stand-in helper (no
-    /// browser, no network): open → capture → close, and the two honest refusals. The fake
+    /// browser, no network): open → capture → close, and the two honest refusals. The stand-in
+    /// drops the first load, so the open also proves the retry path end to end: the second try
+    /// opens the page and the summary says the connection was dropped. The fake
     /// install is a `camoufox` marker beside a `python3` wrapper that runs this test binary as
     /// the helper (the work folder travels in the wrapper's environment).
     #[cfg(unix)]
@@ -1835,6 +2025,9 @@ mod tests {
         assert_eq!(opened.result["title"], "Stand-in");
         let failed = opened.result["health"]["failed_requests"].as_array().cloned().unwrap_or_default();
         assert!(failed.iter().any(|f| f["error"] == "net::ERR_CONNECTION_REFUSED"), "{failed:?}");
+        // The stand-in dropped the first load; the retry opened the page and said so.
+        assert_eq!(opened.result["health"]["load_retries"], 1, "{}", opened.summary);
+        assert!(opened.summary.contains("The network dropped the connection 1 time(s)"), "{}", opened.summary);
 
         let out = dir.path().join("capture");
         let captured = e.call("web_site_capture", json!({"output_directory": out.display().to_string(), "widths": [1440], "timeout_secs": 30}), cli()).unwrap();
@@ -1892,6 +2085,7 @@ mod tests {
         let work = std::env::var("CRAFT_STANDIN_WORK").map(std::path::PathBuf::from).unwrap_or_default();
         let stdin = std::io::stdin();
         let mut out = std::io::stdout();
+        let mut goto_calls = 0u32;
         for line in stdin.lock().lines() {
             let Ok(line) = line else { return };
             let Ok(req) = serde_json::from_str::<Value>(&line) else { continue };
@@ -1899,10 +2093,18 @@ mod tests {
             let op = req.get("op").and_then(Value::as_str).unwrap_or_default();
             let reply = match op {
                 "open" => json!({"id": id, "ok": {"product": "Camoufox", "version": "156.0.1", "user_agent": "UA"}}),
-                "goto" => json!({"id": id, "ok": {"loaded": true, "events": [
-                    {"method": "Network.requestWillBeSent", "params": {"requestId": "1", "request": {"url": "http://127.0.0.1:1/"}}},
-                    {"method": "Network.loadingFailed", "params": {"requestId": "1", "errorText": "net::ERR_CONNECTION_REFUSED", "type": "Document"}}
-                ]}}),
+                "goto" => {
+                    goto_calls += 1;
+                    if goto_calls == 1 {
+                        // The first load drops; the retry policy must try again.
+                        json!({"id": id, "ok": {"loaded": false, "load_error": "net::ERR_CONNECTION_RESET", "events": []}})
+                    } else {
+                        json!({"id": id, "ok": {"loaded": true, "events": [
+                            {"method": "Network.requestWillBeSent", "params": {"requestId": "1", "request": {"url": "http://127.0.0.1:1/"}}},
+                            {"method": "Network.loadingFailed", "params": {"requestId": "1", "errorText": "net::ERR_CONNECTION_REFUSED", "type": "Document"}}
+                        ]}})
+                    }
+                }
                 "eval" => {
                     let script = req.get("script").and_then(Value::as_str).unwrap_or_default();
                     let value = if script.contains("readyState") {

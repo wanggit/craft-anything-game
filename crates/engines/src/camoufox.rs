@@ -221,10 +221,13 @@ impl Helper {
         self.request("open", json!({"headless": headless, "width": width, "height": height, "os": os}), dl)
     }
 
-    /// Load a page and collect what went wrong, as the browser's events.
-    pub fn goto(&mut self, url: &str, settle_ms: u64, dl: &Deadline) -> Result<(bool, Vec<CdpEvent>), ToolError> {
+    /// Load a page and collect what went wrong, as the browser's events. A load that failed
+    /// altogether comes back as data — the browser's own words in `load_error`, never a crashed
+    /// request — so the caller can decide whether to try again (the page survives).
+    pub fn goto(&mut self, url: &str, settle_ms: u64, dl: &Deadline) -> Result<(bool, Vec<CdpEvent>, Option<String>), ToolError> {
         let r = self.request("goto", json!({"url": url, "settle_ms": settle_ms}), dl)?;
         let loaded = r.get("loaded").and_then(Value::as_bool).unwrap_or(false);
+        let load_error = r.get("load_error").and_then(Value::as_str).map(str::to_string);
         let mut events = Vec::new();
         for e in r.get("events").and_then(Value::as_array).into_iter().flatten() {
             events.push(CdpEvent {
@@ -233,7 +236,7 @@ impl Helper {
                 session_id: None,
             });
         }
-        Ok((loaded, events))
+        Ok((loaded, events, load_error))
     }
 
     /// Run a read-only script in the page and return its JSON value.
@@ -349,8 +352,9 @@ mod tests {
         let mut h = Helper::start(&cmd, &work, &d).unwrap();
         let info = h.open(true, 800, 600, "macos", &d).unwrap();
         assert_eq!(info["product"], "Camoufox");
-        let (loaded, events) = h.goto("http://127.0.0.1:1/", 0, &d).unwrap();
+        let (loaded, events, load_error) = h.goto("http://127.0.0.1:1/", 0, &d).unwrap();
         assert!(loaded);
+        assert_eq!(load_error, None);
         assert!(events.iter().any(|e| e.method == "Network.requestWillBeSent"), "{events:?}");
         // A small value arrives in the line; a big one through a file.
         assert_eq!(h.eval("small", &d).unwrap(), json!({"small": true}));
@@ -375,6 +379,19 @@ mod tests {
         let err = h.eval("boom", &d).unwrap_err();
         assert_eq!(err.code, ErrorCode::ProgramFailed);
         assert!(err.message.contains("stand-in says no"), "{}", err.message);
+    }
+
+    /// A page that didn't load at all is data, not a crashed request: the browser's own words
+    /// arrive in `load_error`, so the caller can decide to try again.
+    #[test]
+    fn a_dropped_load_comes_back_as_data_not_an_error() {
+        let (_keep, work) = work_dir();
+        let cmd = stand_in("net-drop", &work);
+        let d = dl(30);
+        let mut h = Helper::start(&cmd, &work, &d).unwrap();
+        let (loaded, _events, load_error) = h.goto("http://127.0.0.1:1/", 0, &d).unwrap();
+        assert!(!loaded);
+        assert_eq!(load_error.as_deref(), Some("Page.goto: NS_ERROR_NET_RESET"), "the browser's own words");
     }
 
     #[test]
@@ -431,6 +448,14 @@ mod tests {
         assert!(HELPER_PY.contains("MAX_TRACKED_RESPONSES"), "the memory it holds is bounded");
     }
 
+    /// A load that failed at once arrives as data — the browser's own words in `load_error` —
+    /// never a crashed request the caller can't retry.
+    #[test]
+    fn the_helper_reports_a_failed_load_as_data() {
+        assert!(HELPER_PY.contains("\"load_error\": str(e)[:300]"), "{HELPER_PY:?}");
+        assert!(!HELPER_PY.contains("the page didn't load: %s"), "the helper no longer raises for a failed load");
+    }
+
     #[test]
     fn a_file_name_with_a_path_is_refused() {
         let (_keep, work) = work_dir();
@@ -451,8 +476,9 @@ mod tests {
 
     /// The stand-in helper: a second entry point of this test binary that speaks the protocol
     /// on stdio (started by the tests above with `--ignored --exact`). CRAFT_STANDIN_BEHAVIOR
-    /// `exits` quits at once; `hangs` reads but never answers. CRAFT_STANDIN_WORK is where
-    /// file payloads go (the real helper gets the work folder as its argument).
+    /// `exits` quits at once; `hangs` reads but never answers; `net-drop` answers every `goto`
+    /// with a dropped connection. CRAFT_STANDIN_WORK is where file payloads go (the real helper
+    /// gets the work folder as its argument).
     #[test]
     #[ignore = "stand-in started by the tests above"]
     fn stand_in_helper() {
@@ -474,6 +500,7 @@ mod tests {
             let op = req.get("op").and_then(Value::as_str).unwrap_or_default();
             let reply = match op {
                 "open" => json!({"id": id, "ok": {"product": "Camoufox", "version": "156.0.1", "user_agent": "UA"}}),
+                "goto" if behavior == "net-drop" => json!({"id": id, "ok": {"loaded": false, "load_error": "Page.goto: NS_ERROR_NET_RESET", "events": []}}),
                 "goto" => json!({"id": id, "ok": {"loaded": true, "events": [
                     {"method": "Network.requestWillBeSent", "params": {"requestId": "1", "request": {"url": "http://127.0.0.1:1/"}}},
                     {"method": "Network.loadingFailed", "params": {"requestId": "1", "errorText": "net::ERR_CONNECTION_REFUSED", "type": "Document"}}

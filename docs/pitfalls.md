@@ -483,6 +483,14 @@ the true rebuild degraded to screenshot matching with no note (poki.com/snake-vs
 Steps that don't need each other's success run regardless and each notes its own failure, in the
 order the later one needs (the play loads the lazy assets the save then keeps).
 
+**A one-shot load the network dropped.** Two runs died at their first `web site open` with
+`NS_ERROR_NET_RESET` seconds in, while the same address loaded on the very next attempt — the run
+stopped and the person had to start it again by hand (poki.com/snake-vs-human, 2026-11-11). A load
+that can fail on a dropped connection is retried inside the run (bounded), the retry decides on a
+typed flag set where the browser's words enter — never on message wording — a page that needed the
+retries says so in what the person reads, and the failure that remains names the connection, not
+the program's install.
+
 **A size measured after drawing, used a frame late.** The prompt box's height was measured each
 frame and used to size the feed on the next, so every time it grew or shrank one frame showed it
 100 px too low, and typing looked like flicker. When a layout uses a size from the last frame,

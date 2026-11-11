@@ -12,6 +12,9 @@ Ops:
       -> {"product": "Camoufox", "version": "...", "user_agent": "..."}
   {"id": N, "op": "goto", "url": "...", "settle_ms": MS}
       -> {"loaded": true, "events": [{"method": "...", "params": {...}}, ...]}
+       | {"loaded": false, "load_error": "...", "events": [...]}
+         (the page didn't load at all: a failure arrives as data, in the browser's own
+          words, so the caller can decide whether to try again)
   {"id": N, "op": "eval", "script": "..."}        -> {"value": ...}
   {"id": N, "op": "screenshot", "mode": "full_page" | "viewport"}
       -> {"file": "resp-<id>.png"}  (the PNG's bytes in the work folder)
@@ -235,8 +238,9 @@ class Helper:
         except PwTimeout:
             loaded = False
         except PwError as e:
-            # The page didn't load at all; say so in the page's own words.
-            raise RuntimeError("the page didn't load: %s" % str(e)[:300])
+            # The page didn't load at all: a failure arrives as data, in the page's own words,
+            # so the caller can decide whether the drop is worth another try (the page survives).
+            return {"loaded": False, "load_error": str(e)[:300], "events": self.events}
         if settle_ms:
             self.page.wait_for_timeout(settle_ms)
         return {"loaded": loaded, "events": self.events}

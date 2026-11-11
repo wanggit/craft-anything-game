@@ -1129,6 +1129,14 @@ It speaks Playwright, not CDP, so it needs its own engine and the browser seam t
 - [ ] The generic browser tools (`web_page_*` in browser_tools.rs) on the same seam, so they can
       inspect a Camoufox site too
 - [ ] Settings UI for `engines.web_browser` (config.toml only so far)
+- [x] A load the network drops doesn't stop the run (poki.com/snake-vs-human, 2026-11-11: two
+      runs' first `web site open` died with `NS_ERROR_NET_RESET` seconds in, while the same
+      address loaded on the very next attempt): a page load that fails on a dropped connection
+      is tried again inside the run (bounded, in the `PageConn` seam both browsers share, keyed
+      on a typed flag the browser-text boundary sets — never on message wording), a page that
+      needed the retries says so in the open's summary, and a failure that remains names the
+      connection, not the Camoufox install
+      — claimed: claude, branch bugfix/r3.14-net-drop-retry; PR #29
 - [ ] Live runs against real sites behind anti-bot walls with Camoufox, and the success
       comparison against the Chromium path; record results in tool-status.md
 
