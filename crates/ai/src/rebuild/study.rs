@@ -254,7 +254,15 @@ impl Worker {
         let src = embed.get("src").and_then(Value::as_str).unwrap_or_default().to_string();
         if !src.is_empty() {
             self.step(ws, Step::Study, Status::Inspecting, &format!("Photographing the {} on its own, waiting for it to load…", focus.what))?;
-            let got = self.call("web_site_open", focus_open_params(&src)).and_then(|_| {
+            let opened = self.call("web_site_open", focus_open_params(&src));
+            if let Err(e) = opened {
+                self.step(
+                    ws,
+                    Step::Study,
+                    Status::Inspecting,
+                    &format!("The {} wouldn't open on its own ({}); cutting it out of the page's screenshots instead.", focus.what, e.message),
+                )?;
+            } else {
                 // A game goes on loading its assets long after the page settles; photographed too
                 // soon it is its loading screen, which the builder then chases (R2.11).
                 let until = std::time::Instant::now() + Duration::from_secs(FOCUS_LOAD_WAIT_SECS);
@@ -262,76 +270,21 @@ impl Worker {
                     std::thread::sleep(Duration::from_millis(500));
                     self.stop.check()?;
                 }
-                self.call(
-                    "web_site_capture",
-                    json!({"output_directory": out.display().to_string(), "include_html": false, "noise_pass": true, "widths": widths}),
-                )
-            });
-            match got {
-                Ok(_) => {
-                    // The game's own files (R2.12): the browser already loaded every byte of code
-                    // and art a rebuild needs, and the rebuild may use them as they are. Deep mode
-                    // only — the tool refuses in Clean room, and the brief only mentions what exists.
-                    if !self.engine.session().clean_room() {
-                        let saved = self.call(
-                            craft_anything_engine::tools::website_tools::RESOURCES_SAVE_TOOL,
-                            json!({"output_directory": out.join(kinds::website::RESOURCES_DIR).display().to_string()}),
-                        );
-                        match saved {
-                            Ok(_) => self.step(
-                                ws,
-                                Step::Study,
-                                Status::Inspecting,
-                                &format!(
-                                    "Saved the {}'s own files (code, data, pictures, sounds) into {}/{}/.",
-                                    focus.what,
-                                    kinds::website::FOCUS_DIR,
-                                    kinds::website::RESOURCES_DIR
-                                ),
-                            )?,
-                            Err(e) => self.step(
-                                ws,
-                                Step::Study,
-                                Status::Inspecting,
-                                &format!(
-                                    "The {}'s own files couldn't be saved ({}); it is rebuilt from the screenshots and measurements.",
-                                    focus.what, e.message
-                                ),
-                            )?,
-                        }
-                    }
-                    // The game's play states (R2.13): tap through it the way a player would and
-                    // photograph each new screen — the check replays these against the build, so
-                    // a rebuild of the boot screen alone can no longer pass as the game.
-                    let states = self.call(
-                        "web_game_states_capture",
-                        json!({"output_directory": out.join(kinds::website::PLAY_STATES_DIR).display().to_string(), "max_states": 5}),
-                    );
-                    match states {
-                        Ok(_) => self.step(
-                            ws,
-                            Step::Study,
-                            Status::Inspecting,
-                            &format!("Photographed the {}'s play states into {}/{}/.", focus.what, kinds::website::FOCUS_DIR, kinds::website::PLAY_STATES_DIR),
-                        )?,
-                        Err(e) => self.step(
-                            ws,
-                            Step::Study,
-                            Status::Inspecting,
-                            &format!(
-                                "The {}'s play states couldn't be photographed ({}); only the screens already captured are compared.",
-                                focus.what, e.message
-                            ),
-                        )?,
-                    }
+                let mut call = |tool: &str, params: Value| self.call(tool, params);
+                let (captured, notes) = focus_keep(&mut call, &widths, &out, &focus.what, !self.engine.session().clean_room());
+                for n in notes {
+                    self.step(ws, Step::Study, Status::Inspecting, &n)?;
+                }
+                if let Err(e) = captured {
+                    self.step(
+                        ws,
+                        Step::Study,
+                        Status::Inspecting,
+                        &format!("The {}'s own page wouldn't photograph ({}); cutting it out of the page's screenshots instead.", focus.what, e),
+                    )?;
+                } else {
                     return Ok(());
                 }
-                Err(e) => self.step(
-                    ws,
-                    Step::Study,
-                    Status::Inspecting,
-                    &format!("The {} wouldn't open on its own ({}); cutting it out of the page's screenshots instead.", focus.what, e.message),
-                )?,
             }
         }
         match crop_focus_into(&capture, &out, &embed)? {
@@ -392,6 +345,51 @@ pub(super) const FOCUS_LOAD_WAIT_SECS: u64 = 25;
 /// then [`FOCUS_LOAD_WAIT_SECS`] more before it is photographed.
 pub(super) fn focus_open_params(src: &str) -> Value {
     json!({"url": src, "settle_ms": 20_000})
+}
+
+/// Once the focused page is open: its picture, then — whatever the picture did — the game's play
+/// states and its own files. The two saves are what a true rebuild is written from (R2.12/R2.13);
+/// a photograph that fails must not drop them (2026-11-11: a poki game's own page wouldn't
+/// photograph, both saves sat in its success branch, and the rebuild came out as screenshots
+/// only). Play states first: the player's clicks reach a game behind a notice ("Click here to
+/// play!") and load its lazy assets, whose files the save then keeps. Each step is best effort —
+/// its failure is one plain note and the rebuild goes on — and the picture's own failure comes
+/// back for the caller's crop fallback.
+pub(super) fn focus_keep(
+    call: &mut dyn FnMut(&str, Value) -> Result<ToolOutput, ToolError>,
+    widths: &[u32],
+    out: &Path,
+    what: &str,
+    deep: bool,
+) -> (Result<(), String>, Vec<String>) {
+    let captured =
+        call("web_site_capture", json!({"output_directory": out.display().to_string(), "include_html": false, "noise_pass": true, "widths": widths}));
+    let mut notes = Vec::new();
+    // The game's play states (R2.13): tap through it the way a player would and photograph each
+    // new screen — the check replays these against the build, so a rebuild of the boot screen
+    // alone can no longer pass as the game.
+    match call("web_game_states_capture", json!({"output_directory": out.join(kinds::website::PLAY_STATES_DIR).display().to_string(), "max_states": 5})) {
+        Ok(_) => notes.push(format!("Photographed the {}'s play states into {}/{}/.", what, kinds::website::FOCUS_DIR, kinds::website::PLAY_STATES_DIR)),
+        Err(e) => notes.push(format!("The {}'s play states couldn't be photographed ({}); only the screens already captured are compared.", what, e.message)),
+    }
+    // The game's own files (R2.12): the browser already loaded every byte of code and art a
+    // rebuild needs, and the rebuild may use them as they are. Deep mode only — the tool refuses
+    // in Clean room, and the brief only mentions what exists.
+    if deep {
+        match call(
+            craft_anything_engine::tools::website_tools::RESOURCES_SAVE_TOOL,
+            json!({"output_directory": out.join(kinds::website::RESOURCES_DIR).display().to_string()}),
+        ) {
+            Ok(_) => notes.push(format!(
+                "Saved the {}'s own files (code, data, pictures, sounds) into {}/{}/.",
+                what,
+                kinds::website::FOCUS_DIR,
+                kinds::website::RESOURCES_DIR
+            )),
+            Err(e) => notes.push(format!("The {}'s own files couldn't be saved ({}); it is rebuilt from the screenshots and measurements.", what, e.message)),
+        }
+    }
+    (captured.map(|_| ()).map_err(|e| e.message), notes)
 }
 
 /// Cut the focused view's boxes out of the page's screenshots into `out`, one per width the view
@@ -483,5 +481,47 @@ mod tests {
         assert_eq!(p["url"], "https://g.test/play");
         assert_eq!(p["settle_ms"], 20_000);
         assert_eq!(FOCUS_LOAD_WAIT_SECS, 25);
+    }
+
+    /// 2026-11-11: a poki game's own page wouldn't photograph, and the play states and file save
+    /// sat in the photograph's success branch — the true rebuild came out as screenshots only.
+    /// The saves run whatever the photograph did, play states first (the player's clicks load the
+    /// lazy assets the save then keeps), and Clean room saves no files.
+    #[test]
+    fn a_failed_picture_never_drops_the_game_files_and_play_states() {
+        let d = tempfile::tempdir().unwrap();
+        let out = d.path();
+        let mut calls = Vec::new();
+        let mut fail_capture = |tool: &str, _p: Value| {
+            calls.push(tool.to_string());
+            match tool {
+                "web_site_capture" => Err(ToolError::invalid("the page wouldn't photograph")),
+                _ => Ok(ToolOutput::Value(json!({}))),
+            }
+        };
+        let (captured, notes) = focus_keep(&mut fail_capture, &[1440], out, "the game area", true);
+        assert_eq!(captured.unwrap_err(), "the page wouldn't photograph");
+        assert_eq!(calls, ["web_site_capture", "web_game_states_capture", "web_resources_save"], "the saves follow a failed picture, states first");
+        assert!(notes[0].contains("play states") && notes[1].contains("own files"), "{notes:?}");
+        // The picture's success comes back, and Clean room keeps its hands off the files.
+        calls.clear();
+        let mut ok = |tool: &str, _p: Value| {
+            calls.push(tool.to_string());
+            Ok(ToolOutput::Value(json!({})))
+        };
+        assert!(focus_keep(&mut ok, &[1440], out, "the game area", false).0.is_ok());
+        assert_eq!(calls, ["web_site_capture", "web_game_states_capture"], "Clean room saves no files");
+        // A save that fails is a plain note, not a stopped study.
+        calls.clear();
+        let mut fail_states = |tool: &str, _p: Value| {
+            calls.push(tool.to_string());
+            match tool {
+                "web_game_states_capture" => Err(ToolError::invalid("no game to tap")),
+                _ => Ok(ToolOutput::Value(json!({}))),
+            }
+        };
+        let (captured, notes) = focus_keep(&mut fail_states, &[1440], out, "the game area", true);
+        assert!(captured.is_ok() && notes[0].contains("couldn't be photographed") && notes[1].contains("own files"), "{notes:?}");
+        assert_eq!(calls, ["web_site_capture", "web_game_states_capture", "web_resources_save"]);
     }
 }

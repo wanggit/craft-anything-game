@@ -932,7 +932,7 @@ true-rebuild attempts (the person).
       `web_game` on `rebuild_start`, `--web-game` on `rebuild`. It needs Deep (the chain reads
       the game's own files): the tile switches Deep on, and a start without Deep refuses and
       names the one switch to make — claimed: claude, branch feature/r2.12-poki-game-tile; PR #27
-- [ ] A failed focused photograph never drops the game's files and play states (the person,
+- [x] A failed focused photograph never drops the game's files and play states (the person,
       2026-11-11: a snake-vs-human run started from the "Poki游戏" tile still came out as
       screenshots, because `web_site_capture` of the game's own page failed and both saves sat
       in its success branch): once the focused page is open, the play states and the files save
