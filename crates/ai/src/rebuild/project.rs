@@ -38,7 +38,14 @@ pub(super) fn first_stack(kinds: &KindRegistry, ws: &Workspace, deep: bool) -> O
 /// matter"), as a typed [`Focus`] for the manifest. This is the one place these words are read:
 /// the study and the checks follow the typed field. Version 1 recognises an embedded game area
 /// only; a request that scopes to anything else stays the whole target (said as no focus).
-pub fn read_focus(request: &str) -> Option<Focus> {
+///
+/// Naming the game as the rebuild's own object ("复刻这个游戏", "rebuild this game") is the
+/// same ask in fewer words (the person, 2026-11-11: a run rebuilt the portal page from
+/// screenshots because only explicit scoping words were read): on a web page it sets the same
+/// game-area focus, so the true-rebuild chain runs. A game that is the whole target (its own
+/// folder, or no target at all) and a request that names the page ("复刻这个游戏页面") stay
+/// the whole target.
+pub fn read_focus(request: &str, target: &TargetRef) -> Option<Focus> {
     let r = request.to_lowercase();
     let game = ["游戏", "遊戲", "game"].iter().any(|w| r.contains(w));
     let scoped = [
@@ -70,7 +77,45 @@ pub fn read_focus(request: &str) -> Option<Focus> {
     ]
     .iter()
     .any(|p| r.contains(p));
-    (game && scoped).then(|| Focus { what: "the game area".into(), element_id: None })
+    if game && scoped {
+        return Some(Focus { what: "the game area".into(), element_id: None });
+    }
+    // The game named as the rebuild's object, on a web page only.
+    let names_the_game =
+        ["这个游戏", "這個遊戲", "此游戏", "此遊戲", "该游戏", "該遊戲", "这款游戏", "這款遊戲", "this game", "that game"].iter().any(|p| r.contains(p));
+    let names_the_page =
+        ["这个游戏页面", "这个游戏网页", "这个游戏网站", "这个游戏页", "這個遊戲頁面", "this game page", "this game website", "this game site"]
+            .iter()
+            .any(|p| r.contains(p));
+    let rebuilds = [
+        "复刻",
+        "復刻",
+        "重做",
+        "克隆",
+        "重建",
+        "重现",
+        "重現",
+        "复现",
+        "復現",
+        "重制",
+        "重製",
+        "remake",
+        "remade",
+        "rebuild",
+        "rebuilt",
+        "clone",
+        "cloned",
+        "recreate",
+        "recreated",
+        "replicate",
+        "remaster",
+        "reproduce",
+        "copy",
+    ]
+    .iter()
+    .any(|p| r.contains(p));
+    (matches!(target, TargetRef::Website { .. }) && names_the_game && rebuilds && !names_the_page)
+        .then(|| Focus { what: "the game area".into(), element_id: None })
 }
 
 /// Whether the request asks for the original's own files to run as they are (the only way a
@@ -145,27 +190,43 @@ mod tests {
 
     /// R2.11: the one place the person's scoping words are read. A game with the rest of the page
     /// out of scope becomes a typed focus; a game on its own ("复刻一个游戏") is the whole target,
-    /// as is anything that scopes to something that isn't an embedded game.
+    /// as is anything that scopes to something that isn't an embedded game. Naming the game as
+    /// the rebuild's object on a web page ("复刻这个游戏", the person 2026-11-11) is the same
+    /// ask in fewer words and sets the same focus; on its own folder or with no target, and when
+    /// the request names the page, it is the whole target.
     #[test]
     fn the_request_says_whether_just_the_game_is_wanted() {
+        let web = TargetRef::Website { url: "https://poki.com/zh/g/snake-vs-human".into() };
         for request in [
             "你参考 https://x/game 复刻一个游戏，只关注游戏区域，其他区域不需要关注。",
             "Rebuild the game at https://x; only the game area, ignore the rest of the page",
             "clone this game, just the game, not the page around it",
         ] {
-            let f = read_focus(request).unwrap_or_else(|| panic!("{request} sets a focus"));
+            let f = read_focus(request, &web).unwrap_or_else(|| panic!("{request} sets a focus"));
+            assert_eq!(f.what, "the game area");
+            assert_eq!(f.element_id, None);
+        }
+        for request in ["https://poki.com/zh/g/snake-vs-human  复刻这个游戏", "复刻这个游戏", "Rebuild this game 1:1", "帮我重制一下这个游戏"]
+        {
+            let f = read_focus(request, &web).unwrap_or_else(|| panic!("{request} names the game on a page"));
             assert_eq!(f.what, "the game area");
             assert_eq!(f.element_id, None);
         }
         for request in [
             "复刻一个游戏",
-            "Rebuild this game 1:1",
             "只关注表单区域，其他不需要",
             "make me a game like that one",
             "复刻这个网站",
             "only the pricing section, ignore the rest",
+            "复刻这个游戏页面",
         ] {
-            assert!(read_focus(request).is_none(), "{request:?} is the whole target");
+            assert!(read_focus(request, &web).is_none(), "{request:?} is the whole target");
+        }
+        // A game that is the whole target has no page around it to ignore.
+        for target in [TargetRef::None, TargetRef::Local { path: "/games/x".into() }] {
+            for request in ["复刻这个游戏", "Rebuild this game 1:1"] {
+                assert!(read_focus(request, &target).is_none(), "{request:?} on {target:?} is the whole target");
+            }
         }
     }
 }

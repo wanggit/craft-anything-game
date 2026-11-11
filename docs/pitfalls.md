@@ -450,6 +450,13 @@ before running a process rather than starting an agent without the tools its tas
 a headless game rebuild stopped at once for want of Unity. It was found only by a live run. Run the
 real flow end to end after changing how requests are read, and add the case as a test.
 
+**A capability keyed to words the person never types.** The true-rebuild chain (focused brief,
+saved resources, play states) turned on only for explicit scoping phrases ("只关注游戏区域"), so
+the plain request "复刻这个游戏" rebuilt the portal page from screenshots (poki.com/snake-vs-human,
+2026-11-11) with the whole pipeline silently skipped. When behaviour turns on only for specific
+phrasings, the natural phrasing of the same intent must turn it on too: test the read with what
+people actually type, not only the words that named the feature.
+
 **A default given as an order.** "A notes app in Electron" was built in Rust: the brief quoted the
 request, then said "Use Rust with eframe/egui… create a cargo project" with nothing saying which
 wins, and the builder followed the later, more specific line; the app, the build check and Play
