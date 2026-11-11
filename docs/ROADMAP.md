@@ -895,7 +895,10 @@ true-rebuild attempts (the person).
       one provider "high risk" rejection cut the first turn; the decompiled-mechanics path was not
       exercised (the game's code is readable PlayCanvas source, adapted 1:1 into 112 scripts), and
       its 1042 lazy-loaded assets were never captured, so the first pass shipped typed
-      placeholders until a re-run pulled the real files (MD5-verified) from the game's own server
+      placeholders until a re-run pulled the real files (MD5-verified) from the game's own server Attempt 2 (Ninja Hands, a Unity game never seen before, 2026-11-11): **one pass to Ready**
+      with the six levers and no human reminders — 96% alike (1440: 98%, 768: 97%, 390: 94%),
+      8/8 claims (play-state replay; asset provenance: 2 as-is / 194 fetched from the game's
+      server / 2 stand-ins named), MECHANICS.md from the metadata, unknowns kept honestly
 - [ ] The focused brief never accepts placeholders when the game's own files can be fetched: a
       true rebuild downloads the missing originals from the game's own server instead of typed
       stand-ins (attempt 1 shipped 1042 placeholders and passed every claim until the person
@@ -976,6 +979,10 @@ the states.
       tooling (the tools above exist), and an analysis budget — a question that needs more than
       a few tool calls becomes an unknown and the build goes on
       — claimed: claude, branch feature/r2.13-staged-brief; PR #24
+- [ ] The play-states auto-player clicks land (Ninja Hands photographed only the start view:
+      the connection dialog's buttons ignored synthetic clicks — trusted input or a
+      pointer-events-aware tap is needed), and the analysis-script ban gains a pixel-probe tool
+      (measuring reference pictures had no tool to answer with — the one justified exception)
 - [ ] A new builder session per stage (a 14 MB session 400'd the provider twice): the run
       restarts the conversation at each stage boundary from the brief, what's in app/ and the
       kept replies — the handoff path already starts fresh from the project
