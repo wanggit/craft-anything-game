@@ -307,10 +307,15 @@ fn rebuild_start(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, ToolErr
     })?;
     // The true-rebuild chain reads the game's own files: never in Clean room (the person's
     // "Poki游戏" pick, or web_game here, must really get what it promises).
-    if p.web_game && ctx.session.clean_room() {
-        return Err(ToolError::new(ErrorCode::FeatureMissing, "A true rebuild of a web game reads the game's own files, which Clean room never does.")
-            .with_remediation(craft_anything_engine::clean_room::REMEDIATION)
-            .with_details(json!({"reason": "clean_room", "tool": "rebuild_start"})));
+    if p.web_game {
+        if p.project.is_some() {
+            return Err(ToolError::invalid("web_game is for new projects; a project keeps the focus it was created with."));
+        }
+        if ctx.session.clean_room() {
+            return Err(ToolError::new(ErrorCode::FeatureMissing, "A true rebuild of a web game reads the game's own files, which Clean room never does.")
+                .with_remediation(craft_anything_engine::clean_room::REMEDIATION)
+                .with_details(json!({"reason": "clean_room", "tool": "rebuild_start"})));
+        }
     }
     let runs = runs(ctx);
     let settings: &Settings = &ctx.session.settings;
@@ -321,9 +326,6 @@ fn rebuild_start(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, ToolErr
             }
             if p.generate_assets {
                 return Err(ToolError::invalid("generate_assets is for new projects.").with_remediation("Use project_assets_allow for an existing project."));
-            }
-            if p.web_game {
-                return Err(ToolError::invalid("web_game is for new projects; a project keeps the focus it was created with."));
             }
             (open(dir)?, (!p.resume).then(|| p.request.clone()))
         }
@@ -532,6 +534,30 @@ mod tests {
         assert!(e.call("rebuild_note", json!({"project": ws.root, "text": "blue"}), ok()).is_err());
         assert!(e.call("rebuild_note_withdraw", json!({"project": ws.root, "id": 1}), ok()).is_err());
         assert!(e.call("rebuild_stop", json!({"project": ws.root}), ok()).is_err());
+    }
+
+    /// The "Poki游戏" pick (`web_game`): a new project's choice — a follow-up keeps the focus the
+    /// project was created with — and never in Clean room, where the chain can't read the game's
+    /// own files (R2.12).
+    #[test]
+    fn web_game_is_a_new_projects_choice_that_needs_deep() {
+        let d = tempfile::tempdir().unwrap();
+        let mut s = craft_anything_engine::testing::session();
+        s.settings.deep_mode = false;
+        let e = Engine::shared(s, specs());
+        let ok = || CallOptions::new(Caller::Cli).with_consent(Consent::Granted);
+        let err = e
+            .call(
+                "rebuild_start",
+                json!({"request": "复刻这个游戏", "target": "https://poki.com/zh/g/snake-vs-human", "web_game": true, "projects_dir": d.path()}),
+                ok(),
+            )
+            .expect_err("Clean room refuses");
+        assert!(craft_anything_engine::clean_room::is_refusal(&err), "{err:?}");
+        assert_eq!(std::fs::read_dir(d.path()).unwrap().count(), 0, "nothing created without Deep");
+        // The misuse is named before the mode: with `project`, it's the wrong parameter.
+        let err = e.call("rebuild_start", json!({"request": "x", "project": d.path(), "web_game": true}), ok()).expect_err("refused");
+        assert!(err.message.contains("for new projects"), "{err:?}");
     }
 
     #[test]
