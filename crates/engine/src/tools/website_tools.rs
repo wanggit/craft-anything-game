@@ -196,6 +196,7 @@ fn web_site_open(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, ToolErr
         h.clone_from(&health);
     }
     // Clean room keeps what a visitor sees: not the page's load errors, failed requests or size in elements.
+    let retries = health.get("load_retries").and_then(Value::as_u64).unwrap_or(0);
     let (visitor, mut facts) = (ctx.session.clean_room(), facts);
     let health = if visitor {
         if let Some(f) = facts.as_object_mut() {
@@ -208,6 +209,8 @@ fn web_site_open(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, ToolErr
     let title = facts.get("title").and_then(Value::as_str).unwrap_or_default().to_string();
     let shown = shown_url(&final_url);
     let opened = if title.is_empty() { format!("Opened {shown}.") } else { format!("Opened {shown}: \"{title}\".") };
+    // A page that needed the load retries says so; a retry that hides in silence hides a hiccup.
+    let opened = if retries > 0 { format!("{opened} The network dropped the connection {retries} time(s) before the page loaded.") } else { opened };
     let count = |k: &str| health.get(k).and_then(Value::as_array).map_or(0, Vec::len);
     let summary = match (count("errors"), count("failed_requests")) {
         (0, 0) => opened,
