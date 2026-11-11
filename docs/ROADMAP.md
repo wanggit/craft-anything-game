@@ -932,6 +932,19 @@ true-rebuild attempts (the person).
       `web_game` on `rebuild_start`, `--web-game` on `rebuild`. It needs Deep (the chain reads
       the game's own files): the tile switches Deep on, and a start without Deep refuses and
       names the one switch to make — claimed: claude, branch feature/r2.12-poki-game-tile; PR #27
+- [x] A failed focused photograph never drops the game's files and play states (the person,
+      2026-11-11: a snake-vs-human run started from the "Poki游戏" tile still came out as
+      screenshots, because `web_site_capture` of the game's own page failed and both saves sat
+      in its success branch): once the focused page is open, the play states and the files save
+      run whatever the photograph did — states first (the player's clicks reach a game behind a
+      "moved" notice and load its lazy assets), the files after (keeping them), each with its
+      honest note, and the crop fallback stays for the comparison pictures
+      — claimed: claude, branch bugfix/r2.12-focus-capture-deps; PR #28
+- [ ] A game that only runs inside its page: poki serves its embed's URL a "has moved — click
+      here to play" notice standalone while the game runs in the portal's iframe (snake-vs-human,
+      2026-11-11). Decide what stands in for such a game — follow the notice the way the
+      play-states player does, or keep the files and states from the portal page's game box —
+      and keep a notice screen out of the play states a build must match
 
 ---
 

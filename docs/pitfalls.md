@@ -477,6 +477,12 @@ The fix then made the check create `checks/round-N/routes/` first, which made `r
 `web_site_capture` (which refuses an existing folder) stopped the run. Create a tool's output parent
 right before that tool runs, never a folder that another tool must create itself.
 
+**Independent work in one step's success branch.** The focused game's play-states capture and file
+save sat inside the "its photograph worked" branch; one failed screenshot silently dropped both, and
+the true rebuild degraded to screenshot matching with no note (poki.com/snake-vs-human, 2026-11-11).
+Steps that don't need each other's success run regardless and each notes its own failure, in the
+order the later one needs (the play loads the lazy assets the save then keeps).
+
 **A size measured after drawing, used a frame late.** The prompt box's height was measured each
 frame and used to size the feed on the next, so every time it grew or shrank one frame showed it
 100 px too low, and typing looked like flicker. When a layout uses a size from the last frame,
