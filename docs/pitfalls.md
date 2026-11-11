@@ -491,6 +491,15 @@ typed flag set where the browser's words enter — never on message wording — 
 retries says so in what the person reads, and the failure that remains names the connection, not
 the program's install.
 
+**A deadlock report that deadlocked.** The lock tracker broke a self-wait correctly, then logged
+the report while holding its registry; the app's log sink serialises writes with a tracked lock,
+so the log call re-entered the tracker and froze the whole app at the second of the report, the
+first time a real deadlock needed reporting (poki.com/snake-vs-human, 2026-11-11). Tests never saw
+it: with no logger installed the log call is a no-op. Bookkeeping that must never block calls
+nothing that can take a lock while its own lock is held — the report's text travels out and is
+written after the drop — and its regression test logs through a tracked lock, in a test program of
+its own (a logger is process-wide).
+
 **A size measured after drawing, used a frame late.** The prompt box's height was measured each
 frame and used to size the feed on the next, so every time it grew or shrank one frame showed it
 100 px too low, and typing looked like flicker. When a layout uses a size from the last frame,
@@ -586,6 +595,10 @@ waited on the first forever. Every build froze after studying its target while t
 said "This is a big one", and no test ran that line. Read the session once; `cargo xtask locks`
 and `platform::sync` now catch this. A wait message must not reassure about what it can't see:
 say how long it's been since anything happened. Find a hang with `sample <pid>`: it names the lock.
+It came back as one guard in a call's argument list, alive across a helper that makes tool calls
+(capture_focus, 2026-11-11: the run waited on the session its own thread held, and the report of
+the "deadlock" froze the app). A guard must never span a tool call: `Engine::call` now refuses one
+at once, in words that name the bug.
 
 **An error that points at nothing.** "Check the output below; run Claude Code by hand" came with no
 output below (the event carried only message and remediation) and no command, and the program
