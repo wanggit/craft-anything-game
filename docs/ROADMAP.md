@@ -681,6 +681,14 @@ Gaps found while using the app for real projects.
 - [ ] `regression_preview_limits_connections_and_releases_listener` fails on this Mac with
       `set_read_timeout` → EINVAL on an excess connection (2026-11-11, fails identically on a
       pristine tree; the Linux run is unknown) — needs its own look
+- [x] A session guard alive across a tool call (the freeze's trigger: `capture_focus` passed
+      `!self.engine.session().clean_room()` in `focus_keep`'s argument list, and a temporary
+      guard there lives until the statement ends — across every tool the helper calls, so the
+      run waited on the session it held itself; poki.com/snake-vs-human, 2026-11-11): the read
+      is bound to a name before the call, and `Engine::call` refuses at once — with the bug
+      named — whenever its thread already holds the session, so the class can never again
+      surface as a "deadlock" and a tracker report
+      — claimed: claude, branch bugfix/r2.9-session-guard-across-call; PR #31
 - [ ] A builder's second `rebuild_check` in a row can fail with "checks/round-0 already exists"
       (seen in a live run): the self-check round folder's removal and re-creation between two asks
       in one turn needs looking at, and the second check should say what the first is still writing
