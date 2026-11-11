@@ -77,6 +77,10 @@ pub struct MakeDraft {
     /// whether the path is a folder (an app can be a folder too).
     #[serde(default)]
     pub game: bool,
+    /// "Poki游戏": a game inside a web page at `url`, rebuilt truly — the game area alone, its
+    /// own files reused and its code rewritten (the chain needs Deep mode).
+    #[serde(default)]
+    pub web_game: bool,
 }
 
 impl Default for MakeDraft {
@@ -100,6 +104,7 @@ impl Default for MakeDraft {
             remember_existing: false,
             ai: None,
             game: false,
+            web_game: false,
         }
     }
 }

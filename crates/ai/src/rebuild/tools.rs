@@ -149,6 +149,12 @@ pub struct StartParams {
     /// project_assets_allow.
     #[serde(default)]
     pub generate_assets: bool,
+    /// A game inside a web page (a portal game, e.g. on Poki) to rebuild truly: the game area is
+    /// the rebuild and the page around it is out of scope, the game's own art and data are reused,
+    /// and its code is what the build is written from. New projects only; the target must be the
+    /// game's page. Needs Deep mode — the chain reads the game's own files.
+    #[serde(default)]
+    pub web_game: bool,
     /// The coding agent to use (a backend name), kept with a new project for its later changes;
     /// default: the one set up for building.
     #[serde(default)]
@@ -299,6 +305,18 @@ fn rebuild_start(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, ToolErr
     let engine = engine(ctx).ok_or_else(|| {
         ToolError::new(ErrorCode::FeatureMissing, "Building isn't available in this engine.").with_remediation("Use the app or `craft-anything-cli rebuild`.")
     })?;
+    // The true-rebuild chain reads the game's own files: never in Clean room (the person's
+    // "Poki游戏" pick, or web_game here, must really get what it promises).
+    if p.web_game {
+        if p.project.is_some() {
+            return Err(ToolError::invalid("web_game is for new projects; a project keeps the focus it was created with."));
+        }
+        if ctx.session.clean_room() {
+            return Err(ToolError::new(ErrorCode::FeatureMissing, "A true rebuild of a web game reads the game's own files, which Clean room never does.")
+                .with_remediation(craft_anything_engine::clean_room::REMEDIATION)
+                .with_details(json!({"reason": "clean_room", "tool": "rebuild_start"})));
+        }
+    }
     let runs = runs(ctx);
     let settings: &Settings = &ctx.session.settings;
     let (ws, message) = match &p.project {
@@ -320,7 +338,7 @@ fn rebuild_start(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, ToolErr
                 (None, Some(d)) => project::Place::In(d),
                 (None, None) => project::Place::Projects,
             };
-            let ws = project::new_project(settings, target, &p.request, place, p.build_with.as_deref(), p.generate_assets, p.backend.as_deref())?;
+            let ws = project::new_project(settings, target, &p.request, place, p.build_with.as_deref(), p.generate_assets, p.backend.as_deref(), p.web_game)?;
             if p.project_folder.is_some() {
                 ctx.session.remember_project(&ws.root)?;
             }
@@ -516,6 +534,30 @@ mod tests {
         assert!(e.call("rebuild_note", json!({"project": ws.root, "text": "blue"}), ok()).is_err());
         assert!(e.call("rebuild_note_withdraw", json!({"project": ws.root, "id": 1}), ok()).is_err());
         assert!(e.call("rebuild_stop", json!({"project": ws.root}), ok()).is_err());
+    }
+
+    /// The "Poki游戏" pick (`web_game`): a new project's choice — a follow-up keeps the focus the
+    /// project was created with — and never in Clean room, where the chain can't read the game's
+    /// own files (R2.12).
+    #[test]
+    fn web_game_is_a_new_projects_choice_that_needs_deep() {
+        let d = tempfile::tempdir().unwrap();
+        let mut s = craft_anything_engine::testing::session();
+        s.settings.deep_mode = false;
+        let e = Engine::shared(s, specs());
+        let ok = || CallOptions::new(Caller::Cli).with_consent(Consent::Granted);
+        let err = e
+            .call(
+                "rebuild_start",
+                json!({"request": "复刻这个游戏", "target": "https://poki.com/zh/g/snake-vs-human", "web_game": true, "projects_dir": d.path()}),
+                ok(),
+            )
+            .expect_err("Clean room refuses");
+        assert!(craft_anything_engine::clean_room::is_refusal(&err), "{err:?}");
+        assert_eq!(std::fs::read_dir(d.path()).unwrap().count(), 0, "nothing created without Deep");
+        // The misuse is named before the mode: with `project`, it's the wrong parameter.
+        let err = e.call("rebuild_start", json!({"request": "x", "project": d.path(), "web_game": true}), ok()).expect_err("refused");
+        assert!(err.message.contains("for new projects"), "{err:?}");
     }
 
     #[test]

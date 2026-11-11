@@ -13,7 +13,7 @@ use craft_anything_ai::rebuild::activity::{Action, ActivityNow, LineKind};
 use craft_anything_ai::rebuild::feed::{self, apply};
 use craft_anything_ai::rebuild::{self, AppKind, KindRegistry, KindWords, Note, RebuildRun, RunEvent, RunOptions, Started, Step, Stopped, TargetKind};
 use craft_anything_engine::inbox::{Answer, Inbox, Request, RequestKind};
-use craft_anything_engine::workspace::{CheckResult, Status, TargetRef, Workspace, suggest_name};
+use craft_anything_engine::workspace::{CheckResult, Focus, Status, TargetRef, Workspace, suggest_name};
 use egui::{Color32, Margin, RichText, Ui, Vec2};
 use std::path::{Path, PathBuf};
 
@@ -61,6 +61,12 @@ impl CraftApp {
     pub(crate) fn start_draft(&mut self, draft: MakeDraft) {
         let request = draft.request.trim().to_string();
         if request.is_empty() {
+            return;
+        }
+        // "Poki游戏" promises a true rebuild, which reuses the game's own files: never in Clean
+        // room. The tile picks Deep; this says what to do if it was switched back.
+        if draft.web_game && !self.settings.deep_mode {
+            self.toast(tr("A Poki game rebuild reads the game's own files: choose Deep and start again."), true);
             return;
         }
         let Some(backend) = self.builder_backend(draft.ai.as_deref()) else { return self.need_builder(true) };
@@ -114,6 +120,12 @@ impl CraftApp {
                 m.generate_assets = generate;
                 // Picked on Make: its later changes are built by it too.
                 m.builder = draft.ai;
+                // "Poki游戏": the game area is the rebuild — the person's pick, so the study
+                // saves its files and play states and the true-rebuild brief runs, whatever
+                // the request's words say.
+                if draft.web_game {
+                    m.focus = Some(Focus { what: "the game area".into(), element_id: None });
+                }
             })
             .map_err(|e| e.for_people())?;
             let pictures = ws.add_references(&draft.pictures).err().map(|e| e.message);

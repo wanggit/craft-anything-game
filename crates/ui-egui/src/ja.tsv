@@ -881,3 +881,7 @@ Zoom	拡大/縮小
 Bring all to front	すべてを手前に移動
 Drag to give the plan more or less room; double-click to reset	ドラッグでプランの高さを変更、ダブルクリックで元に戻す
 Copy the message	メッセージをコピー
+A Poki game	Pokiゲーム
+Type the game's address:	ゲームのアドレスを入力：
+For example: recreate this game	例：このゲームを再現する
+A Poki game rebuild reads the game's own files: choose Deep and start again.	Pokiゲームの再現はゲーム本体のファイルを読みます。Deep に切り替えてから開始してください。

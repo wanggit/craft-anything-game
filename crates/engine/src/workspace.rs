@@ -503,6 +503,9 @@ impl Manifest {
         self.builder.clone_from(&other.builder);
         self.questions = other.questions;
         self.name.clone_from(&other.name);
+        // The part to rebuild is the person's pick (Make's "Poki游戏", or their words): a run's
+        // save never re-derives or drops it.
+        self.focus.clone_from(&other.focus);
     }
 }
 
@@ -1360,6 +1363,7 @@ mod tests {
                 m.asset_budget_usd = 20.0;
                 m.generate_assets = true;
                 m.allowed_actions.push("bash:npm".into());
+                m.focus = Some(Focus { what: "the game area".into(), element_id: None });
             })
             .unwrap();
         // The run saves its own progress from the copy it started with.
@@ -1369,6 +1373,7 @@ mod tests {
         let disk = Workspace::open(&run.root).unwrap().manifest;
         assert_eq!((disk.asset_budget_usd, disk.generate_assets), (20.0, true));
         assert_eq!(disk.allowed_actions, ["bash:npm"]);
+        assert_eq!(disk.focus, Some(Focus { what: "the game area".into(), element_id: None }), "the person's focus is kept");
         assert_eq!((disk.status, disk.note.as_str()), (Status::Building, "Building"), "the run's own fields are saved");
         // A setter on the old copy starts from what's on disk too.
         run.set_person(|m| m.asset_budget_usd = 25.0).unwrap();

@@ -630,13 +630,10 @@ impl Worker {
             ws.manifest.stack = project::first_stack(&opts.kinds, ws, deep).ok_or_else(no_kind)?.to_string();
             ws.save()?;
         }
-        // What the person asked to ignore ("only the game area") is read once, here, into the
-        // typed field the study and checks follow (R2.11). Absent: the whole target, as ever.
-        let focus = project::read_focus(&ws.manifest.request, &ws.manifest.target);
-        if ws.manifest.focus != focus {
-            ws.manifest.focus = focus;
-            ws.save()?;
-        }
+        // The request's words fill the typed field the study and checks follow in when there
+        // isn't one yet (R2.11). One already there is the person's ("Poki游戏" on Make, or words
+        // read before) and is never re-derived or dropped. Absent: the whole target, as ever.
+        project::fill_focus(ws)?;
         let kind = opts.kinds.detect(&ws.manifest.request, &ws.manifest.target, &ws.manifest.stack).ok_or_else(no_kind)?;
         self.self_check = Some((kind.clone(), opts.good_enough));
         let kind = kind.as_ref();

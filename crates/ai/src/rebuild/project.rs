@@ -118,6 +118,19 @@ pub fn read_focus(request: &str, target: &TargetRef) -> Option<Focus> {
         .then(|| Focus { what: "the game area".into(), element_id: None })
 }
 
+/// Fill the typed focus from the request's words when there isn't one yet (R2.11). One already
+/// there is the person's ("Poki游戏" on Make, or words read at an earlier run) and is never
+/// re-derived or dropped; the words can add one, never change or remove one. Absent: the whole
+/// target, as ever.
+pub(super) fn fill_focus(ws: &mut Workspace) -> Result<(), ToolError> {
+    if ws.manifest.focus.is_none()
+        && let Some(focus) = read_focus(&ws.manifest.request, &ws.manifest.target)
+    {
+        ws.set_person(|m| m.focus = Some(focus))?;
+    }
+    Ok(())
+}
+
 /// Whether the request asks for the original's own files to run as they are (the only way a
 /// rebuild runs the original's compiled runtime instead of a true rebuild — R2.12). This is the
 /// one place these words are read: the focused brief and the claims follow this answer. Default
@@ -150,7 +163,10 @@ pub fn run_as_is_asked(request: &str) -> bool {
 /// A new project for `request` about `target` (a web address, an absolute path, or `-` for none),
 /// at `place`, with the stack the person
 /// picked (`build_with`), the asset budget from settings, and `generate_assets`: the person lets the
-/// builder generate pictures and 3D models.
+/// builder generate pictures and 3D models. `web_game` is the person's "Poki游戏" pick (2026-11-11):
+/// a game inside a web page, rebuilt truly — the focus is set here, from the choice, never from
+/// the request's words.
+#[allow(clippy::too_many_arguments)] // every argument is a distinct choice the person makes
 pub fn new_project(
     settings: &Settings,
     target: &str,
@@ -159,12 +175,17 @@ pub fn new_project(
     build_with: Option<&str>,
     generate_assets: bool,
     builder: Option<&str>,
+    web_game: bool,
 ) -> Result<Workspace, ToolError> {
     let stack = build_with.map(self::build_with).transpose()?;
     let target_ref = if target.trim() == "-" { TargetRef::None } else { TargetRef::parse(target) };
     if target_ref == TargetRef::None && target.trim() != "-" {
         return Err(ToolError::invalid(format!("{target:?} is neither a web address nor an existing absolute path"))
             .with_remediation("Pass https://… for a website, a full path for a program, or - for none."));
+    }
+    if web_game && !matches!(target_ref, TargetRef::Website { .. }) {
+        return Err(ToolError::invalid("web_game is a game inside a web page: pass its page's address as the target.")
+            .with_remediation("Pass the game's page (https://…), or leave web_game out."));
     }
     let name = suggest_name(request, &target_ref);
     let mut ws = match place {
@@ -180,6 +201,9 @@ pub fn new_project(
         m.asset_budget_usd = budget;
         m.generate_assets = generate_assets;
         m.builder = builder.map(str::to_string);
+        if web_game {
+            m.focus = Some(Focus { what: "the game area".into(), element_id: None });
+        }
     })?;
     Ok(ws)
 }
@@ -228,5 +252,41 @@ mod tests {
                 assert!(read_focus(request, &target).is_none(), "{request:?} on {target:?} is the whole target");
             }
         }
+    }
+
+    /// The person's "Poki游戏" pick sets the focus at creation (2026-11-11): a true rebuild by
+    /// construction, never derived from the request's words. A web game needs a web page.
+    #[test]
+    fn a_web_game_project_gets_the_game_area_focus() {
+        let d = tempfile::tempdir().unwrap();
+        let settings = Settings::default();
+        let want = Some(Focus { what: "the game area".into(), element_id: None });
+        let ws = new_project(&settings, "https://poki.com/zh/g/snake-vs-human", "复刻这个游戏", Place::In(d.path()), None, false, None, true).unwrap();
+        assert_eq!(Workspace::open(&ws.root).unwrap().manifest.focus, want, "the pick is the focus");
+        // The words alone ("Rebuild this game 1:1" never says how) leave it unset.
+        let plain =
+            new_project(&settings, "https://poki.com/zh/g/snake-vs-human", "Rebuild this game 1:1", Place::In(d.path()), None, false, None, false).unwrap();
+        assert_eq!(Workspace::open(&plain.root).unwrap().manifest.focus, None);
+        // Not a web page: refused before anything is written.
+        let err = new_project(&settings, "-", "复刻这个游戏", Place::In(d.path()), None, false, None, true).unwrap_err();
+        assert!(err.message.contains("web page"), "{err:?}");
+    }
+
+    /// The words fill a focus in when there isn't one; one already there — the person's pick or
+    /// words read before — is never replaced or dropped.
+    #[test]
+    fn the_words_only_fill_a_focus_in_never_replace_one() {
+        let d = tempfile::tempdir().unwrap();
+        let settings = Settings::default();
+        let mut ws =
+            new_project(&settings, "https://poki.com/zh/g/snake-vs-human", "Polish the header", Place::In(d.path()), None, false, None, false).unwrap();
+        fill_focus(&mut ws).unwrap();
+        assert_eq!(Workspace::open(&ws.root).unwrap().manifest.focus, None, "no words, no focus");
+        ws.manifest.request = "https://poki.com/zh/g/snake-vs-human  复刻这个游戏".into();
+        fill_focus(&mut ws).unwrap();
+        assert!(Workspace::open(&ws.root).unwrap().manifest.focus.is_some(), "the words fill it in");
+        ws.manifest.request = "复刻这个网站，整个页面都要".into();
+        fill_focus(&mut ws).unwrap();
+        assert!(Workspace::open(&ws.root).unwrap().manifest.focus.is_some(), "later words never drop what is set");
     }
 }

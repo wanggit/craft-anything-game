@@ -88,6 +88,7 @@ pub fn hero(app: &mut CraftApp, ui: &mut Ui, w: f32) {
         if d.mine {
             // The person's own project: there's nothing to recreate.
             (d.target, d.editing_url, d.found, d.builder, d.game) = (TargetRef::None, false, None, None, false);
+            d.web_game = false;
             d.url.clear();
         }
         if left && d.existing == Some(ExistingFiles::Edit) {
@@ -125,15 +126,20 @@ pub fn hero(app: &mut CraftApp, ui: &mut Ui, w: f32) {
         // The example matches the tile picked above (a "recreate this website" hint under
         // "Nothing — start fresh" contradicts the choice).
         let d = &app.state.make;
-        let hint = match &d.target {
-            TargetRef::Local { .. } if d.game => "For example: the same game, with a high-score table",
-            TargetRef::Local { .. } => "For example: the same app, but simpler",
-            TargetRef::Website { .. } => "For example: recreate this website",
-            TargetRef::None if d.editing_url || !d.url.is_empty() => "For example: recreate this website",
-            TargetRef::None => "For example: a website for my bakery",
+        let hint = if d.web_game {
+            "For example: recreate this game"
+        } else {
+            match &d.target {
+                TargetRef::Local { .. } if d.game => "For example: the same game, with a high-score table",
+                TargetRef::Local { .. } => "For example: the same app, but simpler",
+                TargetRef::Website { .. } => "For example: recreate this website",
+                TargetRef::None if d.editing_url || !d.url.is_empty() => "For example: recreate this website",
+                TargetRef::None => "For example: a website for my bakery",
+            }
         };
-        // Websites are photographed for the builder; anything else looks right from pictures.
-        let website = matches!(resolve_target(d), TargetRef::Website { .. }) || d.editing_url;
+        // Websites are photographed for the builder; a game's own screenshots help it look right
+        // too, so pictures can be added for one.
+        let website = (matches!(resolve_target(d), TargetRef::Website { .. }) || d.editing_url) && !d.web_game;
         let submit = request_box(app, ui, hint, (!website).then_some("Add pictures of the original (optional: screenshots help it look right)"));
         if app.state.make.request.trim().is_empty() {
             ui.add_space(10.0);
@@ -315,10 +321,11 @@ fn choose_target(app: &mut CraftApp, ui: &mut Ui) {
     let t = Tokens::get(ui.ctx());
     let d = &app.state.make;
     let local = matches!(d.target, TargetRef::Local { .. }).then_some(d.game);
-    let website = local.is_none() && (d.editing_url || !d.url.is_empty());
-    let scratch = local.is_none() && !website;
+    let website = !d.web_game && local.is_none() && (d.editing_url || !d.url.is_empty());
+    let scratch = local.is_none() && !website && !d.web_game;
     let gap = 10.0;
-    let cols = if ui.available_width() > 760.0 { 4 } else { 2 };
+    // Wide: the five kinds in one row, so Start stays in view at a common window height.
+    let cols = if ui.available_width() > 760.0 { 5 } else { 2 };
     let tile_w = ((ui.available_width() - gap * (cols as f32 - 1.0)) / cols as f32).floor();
     let size = Vec2::new(tile_w, 60.0);
     let mut pick = None;
@@ -328,6 +335,7 @@ fn choose_target(app: &mut CraftApp, ui: &mut Ui) {
             ("globe", "A website", website),
             ("app-window", "An app", local == Some(false)),
             ("puzzle", "A game", local == Some(true)),
+            ("play", "A Poki game", d.web_game),
             ("sparkles", "Nothing — start fresh", scratch),
         ]
         .into_iter()
@@ -339,24 +347,42 @@ fn choose_target(app: &mut CraftApp, ui: &mut Ui) {
         }
     });
     let m = &mut app.state.make;
-    if matches!(pick, Some(0) | Some(3)) {
+    if matches!(pick, Some(0) | Some(3) | Some(4)) {
         // A different kind of start: forget the last game's engine and the engine picked for it.
         m.found = None;
         m.builder = None;
     }
     match pick {
         Some(0) => {
+            m.web_game = false;
             m.target = TargetRef::None;
             m.editing_url = true;
         }
-        Some(1) => app.pick(Pick::TargetFile),
-        Some(2) => app.pick(Pick::TargetFolder),
+        Some(1) => {
+            m.web_game = false;
+            app.pick(Pick::TargetFile);
+        }
+        Some(2) => {
+            m.web_game = false;
+            app.pick(Pick::TargetFolder);
+        }
+        Some(3) => {
+            // "Poki游戏": a game inside a web page, rebuilt truly (its own files reused, its code
+            // rewritten) — which reads the game's own files, so Deep mode is chosen with it.
+            m.web_game = true;
+            m.target = TargetRef::None;
+            m.editing_url = true;
+        }
         Some(_) => {
+            m.web_game = false;
             m.target = TargetRef::None;
             m.url.clear();
             m.editing_url = false;
         }
         None => {}
+    }
+    if pick == Some(3) {
+        app.set_deep(true);
     }
     let m = &mut app.state.make;
     // Recomputed so the address field shows on the very frame "A website" is clicked.
@@ -370,7 +396,7 @@ fn choose_target(app: &mut CraftApp, ui: &mut Ui) {
         });
     } else if website {
         ui.add_space(16.0);
-        ui.label(RichText::new(tr("Type the website's address:")).size(theme::BODY).color(t.text_dim));
+        ui.label(RichText::new(tr(if m.web_game { "Type the game's address:" } else { "Type the website's address:" })).size(theme::BODY).color(t.text_dim));
         ui.add_space(6.0);
         let r = ui.add(
             egui::TextEdit::singleline(&mut m.url)

@@ -55,6 +55,11 @@ pub struct RebuildArgs {
     /// within the project's asset budget). Change it later with `project-assets-allow`.
     #[arg(long)]
     pub generate_assets: bool,
+    /// A game inside a web page (a portal game, e.g. on Poki) to rebuild truly: just the game
+    /// area, its own art and data reused, its code what the build is written from. New projects
+    /// only; the target must be the game's page. Needs --deep (the chain reads the game's files).
+    #[arg(long)]
+    pub web_game: bool,
 }
 
 pub fn rebuild(cli: &Cli, a: &RebuildArgs) -> u8 {
@@ -102,6 +107,16 @@ fn run(cli: &Cli, a: &RebuildArgs) -> Result<bool, ToolError> {
     if a.generate_assets && a.continue_in.is_some() {
         return Err(ToolError::invalid("--generate-assets is for new projects.").with_remediation("Use project-assets-allow for an existing project."));
     }
+    if a.web_game && a.continue_in.is_some() {
+        return Err(ToolError::invalid("--web-game is for new projects; a project keeps the focus it was created with.")
+            .with_remediation("Leave out --web-game, or start a new project."));
+    }
+    // The true-rebuild chain reads the game's own files: never in Clean room (what --web-game
+    // promises must really happen).
+    if a.web_game && engine.session().clean_room() {
+        return Err(ToolError::invalid("A true rebuild of a web game reads the game's own files, which Clean room never does.")
+            .with_remediation(craft_anything_engine::clean_room::REMEDIATION));
+    }
     ensure_agent(&hub, a.backend.as_deref())?;
     let (ws, message) = match &a.continue_in {
         Some(dir) => (Workspace::open(&std::path::absolute(dir).map_err(|e| ToolError::io(dir.display(), e))?)?, (!a.resume).then(|| a.request.clone())),
@@ -116,7 +131,16 @@ fn run(cli: &Cli, a: &RebuildArgs) -> Result<bool, ToolError> {
                 (None, Some(d)) => Place::In(d),
                 (None, None) => Place::Projects,
             };
-            let ws = rebuild::project::new_project(&settings, &a.target, &a.request, place, a.build_with.as_deref(), a.generate_assets, a.backend.as_deref())?;
+            let ws = rebuild::project::new_project(
+                &settings,
+                &a.target,
+                &a.request,
+                place,
+                a.build_with.as_deref(),
+                a.generate_assets,
+                a.backend.as_deref(),
+                a.web_game,
+            )?;
             if folder.is_some() {
                 engine.session().remember_project(&ws.root)?;
             }
