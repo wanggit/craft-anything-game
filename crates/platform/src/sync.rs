@@ -324,7 +324,9 @@ mod tracker {
         dismissed: Vec<String>,
     }
 
-    /// Held only for short bookkeeping, never while taking another lock, so it can't deadlock.
+    /// Held only for short bookkeeping, never while taking another lock — a log sink takes
+    /// locks of its own, so logging under this guard re-enters the tracker and deadlocks it
+    /// (seen 2026-11-11: the report of one broken deadlock froze the whole app).
     fn registry() -> std::sync::MutexGuard<'static, Registry> {
         static REGISTRY: OnceLock<std::sync::Mutex<Registry>> = OnceLock::new();
         REGISTRY.get_or_init(Default::default).lock().unwrap_or_else(PoisonError::into_inner)
@@ -380,41 +382,61 @@ mod tracker {
         None
     }
 
-    fn remember(r: &mut Registry, kind: ProblemKind, summary: String) {
+    /// Remember a problem and hand back the line to log. Nothing is logged here: the registry is
+    /// held, and a log sink takes locks of its own (the app's file sink takes a tracked one), so
+    /// logging under this guard re-enters the tracker and deadlocks it. Callers log after the
+    /// guard is dropped.
+    fn remember(r: &mut Registry, kind: ProblemKind, summary: String) -> Option<String> {
         if r.dismissed.contains(&summary) || r.problems.iter().any(|p| p.summary == summary) {
-            return;
+            return None;
         }
-        log::error!("{summary}");
-        r.problems.push(Problem { kind, summary, log: None });
+        r.problems.push(Problem { kind, summary: summary.clone(), log: None });
         if r.problems.len() > KEEP_PROBLEMS {
             r.problems.remove(0);
         }
+        Some(summary)
     }
 
     /// Should the waiting thread stop? Removes its wait when it should, in the same step as the
-    /// decision, so the next thread in a cycle no longer sees one and carries on.
+    /// decision, so the next thread in a cycle no longer sees one and carries on. The report is
+    /// logged only once the registry is released (see [`remember`]).
     pub fn must_give_up(lock: usize, limits: Limits, early: bool) -> Option<Verdict> {
-        let me = std::thread::current().id();
-        let mut r = registry();
-        if let Some(chain) = cycle(&r, me) {
+        let (verdict, line) = {
+            let mut r = registry();
+            decide(&mut r, std::thread::current().id(), lock, limits, early)
+        };
+        if let Some(l) = line {
+            log::error!("{l}");
+        }
+        verdict
+    }
+
+    /// The decision itself, under the registry: what to do and what to report — no calls that
+    /// could take a lock of their own.
+    fn decide(r: &mut Registry, me: ThreadId, lock: usize, limits: Limits, early: bool) -> (Option<Verdict>, Option<String>) {
+        if let Some(chain) = cycle(r, me) {
             // Unwinding during an unwind would abort the process; left waiting, it's reported
             // by the watchdog as a deadlock to restart from.
             if std::thread::panicking() {
-                return None;
+                return (None, None);
             }
             r.waits.remove(&me);
             let text = format!("A deadlock was found and broken: {chain}.");
-            remember(&mut r, ProblemKind::Broken, text.clone());
-            return Some(Verdict::Deadlock(text));
+            let line = remember(r, ProblemKind::Broken, text.clone());
+            return (Some(Verdict::Deadlock(text)), line);
         }
-        let waited = r.waits.get(&me)?.since.elapsed();
-        let hold = r.holds.get(&lock)?;
+        let Some(waited) = r.waits.get(&me).map(|w| w.since.elapsed()) else {
+            return (None, None);
+        };
+        let Some(hold) = r.holds.get(&lock) else {
+            return (None, None);
+        };
         if hold.job.is_some() {
-            return None;
+            return (None, None);
         }
         let limit = if early { limits.stuck_after } else { limits.give_up_after };
         if waited < limit || hold.since.elapsed() < limit {
-            return None;
+            return (None, None);
         }
         let text = format!(
             "A lock taken at {} by thread '{}' hasn't been released for {} s, so a wait was given up.",
@@ -423,11 +445,11 @@ mod tracker {
             hold.since.elapsed().as_secs()
         );
         if std::thread::panicking() {
-            return None;
+            return (None, None);
         }
         r.waits.remove(&me);
-        remember(&mut r, ProblemKind::Stuck, text.clone());
-        Some(if early { Verdict::Stuck(text) } else { Verdict::Deadlock(text) })
+        let line = remember(r, ProblemKind::Stuck, text.clone());
+        (Some(if early { Verdict::Stuck(text) } else { Verdict::Deadlock(text) }), line)
     }
 
     pub fn unwind(text: String) -> ! {
@@ -441,7 +463,12 @@ mod tracker {
     }
 
     pub fn report(kind: ProblemKind, summary: String) {
-        remember(&mut registry(), kind, summary);
+        // The registry's guard is the statement's temporary: it is dropped before the log line
+        // is written (see [`remember`]).
+        let line = remember(&mut registry(), kind, summary);
+        if let Some(l) = line {
+            log::error!("{l}");
+        }
     }
 
     pub fn dismiss(summary: &str) {
@@ -469,8 +496,15 @@ mod tracker {
                 found.push((kind, format!("Thread '{}' at {} is waiting because {what}.", wait.thread_name, wait.at)));
             }
         }
+        let mut lines = Vec::new();
         for (kind, text) in found {
-            remember(&mut r, kind, text);
+            if let Some(l) = remember(&mut r, kind, text) {
+                lines.push(l);
+            }
+        }
+        drop(r);
+        for l in lines {
+            log::error!("{l}");
         }
     }
 
