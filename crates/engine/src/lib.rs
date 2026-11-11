@@ -219,6 +219,17 @@ impl Engine {
 
     /// Run a tool by id. When a project is open, the call is appended to its journal.
     pub fn call(&self, id: &str, params: Value, opts: CallOptions<'_>) -> Result<ToolOutput, ToolError> {
+        // A session guard alive across this call is a bug in the caller (a read kept in an
+        // argument list lives until the statement ends — capture_focus, 2026-11-11). Taking the
+        // session again would wait on itself; the tracker would break it and call it a deadlock,
+        // which names the wrong thing. Refuse at once, naming the bug — and before anything else,
+        // since even the journal entry below takes the session.
+        if self.session.held_by_current() {
+            return Err(ToolError::internal(format!(
+                "a tool call ({id}) was started while this thread already holds the session: a session guard is alive across the call"
+            ))
+            .with_remediation("Report this to the developers: a caller of this tool kept a session read alive across the call. Nothing was run."));
+        }
         let started = std::time::Instant::now();
         let logged_params = journal::bounded(&params);
         let caller = opts.caller;
@@ -317,6 +328,22 @@ mod tests {
         let e = Engine::new(crate::testing::session());
         let err = e.call("no_such_tool", Value::Null, CallOptions::new(Caller::Cli)).unwrap_err();
         assert_eq!(err.code, ErrorCode::BadInput);
+    }
+
+    /// A session guard alive across a tool call is a bug in the caller (a read kept in an
+    /// argument list lives until the statement ends — capture_focus, 2026-11-11). It is refused
+    /// at once, in words that name the bug, never waited on as a "deadlock"; once the guard is
+    /// gone, the same call runs.
+    #[test]
+    fn a_tool_call_made_while_this_thread_holds_the_session_is_refused_at_once() {
+        let e = Engine::new(crate::testing::session());
+        let held = e.session();
+        let err = e.call("settings_show", Value::Null, CallOptions::new(Caller::Cli)).unwrap_err();
+        assert_eq!(err.code, ErrorCode::Internal, "{}", err.message);
+        assert!(err.message.contains("already holds the session"), "{}", err.message);
+        assert!(err.message.contains("settings_show"), "{}", err.message);
+        drop(held);
+        assert!(e.call("settings_show", Value::Null, CallOptions::new(Caller::Cli)).is_ok());
     }
 
     #[test]

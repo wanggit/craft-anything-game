@@ -173,6 +173,13 @@ impl<T: ?Sized> Mutex<T> {
         }
     }
 
+    /// Is this lock held by the calling thread right now? A caller about to take it again has a
+    /// guard alive across a nested call — a bug worth a clear error at once, not a self-wait the
+    /// tracker breaks as a "deadlock" (see `Engine::call`).
+    pub fn held_by_current(&self) -> bool {
+        tracker::held_by_current(self.id())
+    }
+
     pub fn get_mut(&mut self) -> LockResult<&mut T> {
         self.inner.get_mut()
     }
@@ -265,6 +272,9 @@ mod tracker {
     }
     pub fn held(_: usize, _: &'static Location<'static>) {}
     pub fn released(_: usize) {}
+    pub fn held_by_current(_: usize) -> bool {
+        false
+    }
     pub fn label(_: usize, _: &'static str) {}
     pub fn begin_wait(_: usize, _: &'static Location<'static>) {}
     pub fn end_wait() {}
@@ -343,6 +353,11 @@ mod tracker {
 
     pub fn released(id: usize) {
         registry().holds.remove(&id);
+    }
+
+    /// Is the lock with this id held by the calling thread?
+    pub fn held_by_current(id: usize) -> bool {
+        registry().holds.get(&id).is_some_and(|h| h.thread == std::thread::current().id())
     }
 
     pub fn label(id: usize, job: &'static str) {

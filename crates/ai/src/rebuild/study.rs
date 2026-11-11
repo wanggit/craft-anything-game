@@ -5,6 +5,10 @@ use super::*;
 
 impl Worker {
     pub(super) fn study(&mut self, ws: &mut Workspace, kind: &dyn TargetKind) -> Result<(), ToolError> {
+        // Read once, to a name: a guard made inside a call's argument list or a match guard can
+        // outlive what it looks like it covers, and every tool takes the session again
+        // (2026-11-11's freeze).
+        let clean_room = self.engine.session().clean_room();
         match ws.manifest.target.clone() {
             TargetRef::Website { url } => {
                 self.step(ws, Step::Study, Status::Inspecting, &format!("Opening {url} in a private browser…"))?;
@@ -35,11 +39,11 @@ impl Worker {
                     }
                     self.capture_routes(ws, &url, &widths)?;
                 }
-                if !self.engine.session().clean_room() {
+                if !clean_room {
                     self.how_it_works(ws, &url)?;
                 }
             }
-            TargetRef::Local { path } if self.engine.session().clean_room() => self.study_from_outside(ws, &path)?,
+            TargetRef::Local { path } if clean_room => self.study_from_outside(ws, &path)?,
             TargetRef::Local { path } => {
                 self.step(ws, Step::Study, Status::Inspecting, "Looking inside it (nothing is run)…")?;
                 let (program, folder) = locate(&path, kind.studies_folder());
@@ -51,7 +55,7 @@ impl Worker {
                     Ok(out) => notes.push_str(&describe(&out)),
                     Err(e) => notes.push_str(&format!("A first look failed: {}\n", e.message)),
                 }
-                if !program.is_file() && !self.engine.session().clean_room() {
+                if !program.is_file() && !clean_room {
                     self.step(
                         ws,
                         Step::Study,
@@ -271,7 +275,11 @@ impl Worker {
                     self.stop.check()?;
                 }
                 let mut call = |tool: &str, params: Value| self.call(tool, params);
-                let (captured, notes) = focus_keep(&mut call, &widths, &out, &focus.what, !self.engine.session().clean_room());
+                // Bound to a name before the call: a session guard in the argument list lives
+                // until the statement ends — across every tool `call` makes, each of which takes
+                // the session again (2026-11-11's freeze).
+                let deep = !self.engine.session().clean_room();
+                let (captured, notes) = focus_keep(&mut call, &widths, &out, &focus.what, deep);
                 for n in notes {
                     self.step(ws, Step::Study, Status::Inspecting, &n)?;
                 }
