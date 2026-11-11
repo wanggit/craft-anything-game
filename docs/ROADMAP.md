@@ -925,7 +925,7 @@ true-rebuild attempts (the person).
       a local game or no target, and a request that names the page ("复刻这个游戏页面"), stay
       the whole target
       — claimed: claude, branch bugfix/r2.12-game-request-focus; PR #26
-- [ ] A "Poki游戏" tile beside "A game" on Make (the person, 2026-11-11): a project started from
+- [x] A "Poki游戏" tile beside "A game" on Make (the person, 2026-11-11): a project started from
       it is a true rebuild by construction — the typed focus is set at creation (the person's
       choice, kept by every save and never re-derived from the request's words), the study saves
       the game's files and play states, and the five-stage brief runs. The same choice headless:

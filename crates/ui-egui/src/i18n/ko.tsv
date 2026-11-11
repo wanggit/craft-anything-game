@@ -1448,3 +1448,7 @@ Zoom	확대/축소
 Bring all to front	모두 앞으로 가져오기
 Drag to give the plan more or less room; double-click to reset	끌어서 계획이 차지하는 공간을 조절하고, 두 번 클릭하면 원래대로 돌아갑니다
 Copy the message	메시지 복사
+A Poki game	Poki 게임
+Type the game's address:	게임 주소 입력：
+For example: recreate this game	예：이 게임 재현하기
+A Poki game rebuild reads the game's own files: choose Deep and start again.	Poki 게임 재현은 게임 본체 파일을 읽습니다. Deep로 전환한 뒤 다시 시작하세요.

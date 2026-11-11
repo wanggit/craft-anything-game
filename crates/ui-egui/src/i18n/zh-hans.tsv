@@ -1448,3 +1448,7 @@ Zoom	缩放
 Bring all to front	前置全部窗口
 Drag to give the plan more or less room; double-click to reset	拖动以调整计划占用的空间；双击恢复默认
 Copy the message	复制这条消息
+A Poki game	Poki游戏
+Type the game's address:	输入游戏的地址：
+For example: recreate this game	例如：复刻这个游戏
+A Poki game rebuild reads the game's own files: choose Deep and start again.	Poki游戏复刻要读游戏本体的文件：请切到 Deep 再开始。

@@ -136,7 +136,8 @@ pub fn allows(id: &str) -> bool {
 }
 
 const REASON: &str = "This looks inside the original (its code, files or page source), which Clean room never does.";
-const REMEDIATION: &str = "Turn on Deep mode: the switch in the title bar or Settings, `settings_set deep_mode true`, or `--deep` on the CLI.";
+/// How anything that needs Deep mode says so (one wording, so advice never drifts).
+pub const REMEDIATION: &str = "Turn on Deep mode: the switch in the title bar or Settings, `settings_set deep_mode true`, or `--deep` on the CLI.";
 
 /// Why `id` can't run in this mode, if it can't.
 pub(crate) fn availability(id: &str, clean_room: bool) -> Option<Availability> {

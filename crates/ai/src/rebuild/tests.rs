@@ -274,7 +274,7 @@ fn a_new_project_keeps_the_persons_asset_choice() {
     let d = tempfile::tempdir().unwrap();
     let settings = craft_anything_engine::Settings::default();
     for allow in [false, true] {
-        let ws = project::new_project(&settings, "-", "A snake game", project::Place::In(d.path()), Some("unity"), allow, None).unwrap();
+        let ws = project::new_project(&settings, "-", "A snake game", project::Place::In(d.path()), Some("unity"), allow, None, false).unwrap();
         assert_eq!(Workspace::open(&ws.root).unwrap().manifest.generate_assets, allow);
     }
 }
@@ -2597,18 +2597,20 @@ fn a_project_in_a_picked_folder_tells_the_builder_what_its_files_are() {
         std::fs::write(f.join("index.html"), "<p>hi</p>").unwrap();
         f
     };
-    let usual = project::new_project(&settings, "-", "A notes app", project::Place::In(d.path()), None, false, None).unwrap();
+    let usual = project::new_project(&settings, "-", "A notes app", project::Place::In(d.path()), None, false, None, false).unwrap();
     assert!(!brief(&usual, "app", false, false, None, false, None).contains("folder of their own"), "a usual project says nothing about it");
 
     let mine = folder("mine");
-    let refused = project::new_project(&settings, "-", "Add a contact form", project::Place::At(&mine, None), None, false, None);
+    let refused = project::new_project(&settings, "-", "Add a contact form", project::Place::At(&mine, None), None, false, None, false);
     assert!(refused.is_err(), "a folder with files needs to know what they are");
-    let ws = project::new_project(&settings, "-", "Add a contact form", project::Place::At(&mine, Some(ExistingFiles::Edit)), None, false, None).unwrap();
+    let ws =
+        project::new_project(&settings, "-", "Add a contact form", project::Place::At(&mine, Some(ExistingFiles::Edit)), None, false, None, false).unwrap();
     let b = brief(&ws, "website", false, false, None, false, None);
     assert!(b.contains("already has their files (index.html)") && b.contains("use the workspace folder itself (./)") && b.contains("craft.json"), "{b}");
 
     let start = folder("start");
-    let ws = project::new_project(&settings, "-", "A site like this", project::Place::At(&start, Some(ExistingFiles::StartFrom)), None, false, None).unwrap();
+    let ws =
+        project::new_project(&settings, "-", "A site like this", project::Place::At(&start, Some(ExistingFiles::StartFrom)), None, false, None, false).unwrap();
     let b = brief(&ws, "website", false, false, None, false, None);
     assert!(b.contains("which already had these files: index.html") && b.contains("bring into app/"), "{b}");
     assert!(!b.contains("use the workspace folder itself"));
@@ -2618,7 +2620,7 @@ fn a_project_in_a_picked_folder_tells_the_builder_what_its_files_are() {
 fn a_project_started_in_a_picked_folder_stays_in_the_list() {
     let mut session = craft_anything_engine::testing::session();
     let d = tempfile::tempdir().unwrap();
-    let ws = project::new_project(&session.settings, "-", "A notes app", project::Place::At(&d.path().join("mine"), None), None, false, None).unwrap();
+    let ws = project::new_project(&session.settings, "-", "A notes app", project::Place::At(&d.path().join("mine"), None), None, false, None, false).unwrap();
     session.remember_project(&ws.root).unwrap();
     assert_eq!(session.settings.project_folders, std::slice::from_ref(&ws.root));
     let saved = craft_anything_engine::Settings::load_from(&session.config_dir().join("config.toml"));

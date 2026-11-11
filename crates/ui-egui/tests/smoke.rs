@@ -811,6 +811,39 @@ fn website_choice_stays_picked_while_the_address_is_empty() {
 }
 
 #[test]
+fn a_poki_game_asks_for_its_address_and_picks_deep() {
+    let store = tempfile::tempdir().unwrap();
+    let empty = store.path().to_path_buf();
+    let mut h = harness(move || {
+        let mut a = demo::app(demo::engine(Mode::Beginner, true));
+        a.settings.engines.store_dir = Some(empty);
+        a
+    });
+    h.run_steps(3);
+    assert!(!h.state().settings.deep_mode, "the demo starts in Clean room");
+    h.get_by_label("A Poki game").click();
+    // Several frames: like the website tile, the field must stay put.
+    for _ in 0..3 {
+        h.run_steps(2);
+        assert!(h.state().state.make.web_game);
+        h.get_by_label("Type the game's address:");
+        h.get_by_label("How closely may Craft Anything look at it?");
+    }
+    // The true-rebuild chain reads the game's own files: Deep is chosen with the tile.
+    assert!(h.state().settings.deep_mode, "the tile picks Deep");
+    // No Ghidra in the store: Deep mode offers it first (hover first, as a mouse does).
+    h.get_by_label("Not now").hover();
+    h.run_steps(2);
+    h.get_by_label("Not now").click();
+    h.run_steps(3);
+    h.get_by_label("A website").click();
+    h.run_steps(3);
+    assert!(!h.state().state.make.web_game);
+    assert!(h.query_by_label("Type the game's address:").is_none());
+    h.get_by_label("Type the website's address:");
+}
+
+#[test]
 fn mode_switch_and_deep_toggle() {
     let store = tempfile::tempdir().unwrap();
     let empty = store.path().to_path_buf();
