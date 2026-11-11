@@ -678,6 +678,9 @@ Gaps found while using the app for real projects.
       test that logs through a tracked lock (its own test program, so the process-wide logger
       is its own)
       — claimed: claude, branch bugfix/r2.9-lock-report-freeze
+- [ ] `regression_preview_limits_connections_and_releases_listener` fails on this Mac with
+      `set_read_timeout` → EINVAL on an excess connection (2026-11-11, fails identically on a
+      pristine tree; the Linux run is unknown) — needs its own look
 - [ ] A builder's second `rebuild_check` in a row can fail with "checks/round-0 already exists"
       (seen in a live run): the self-check round folder's removal and re-creation between two asks
       in one turn needs looking at, and the second check should say what the first is still writing
