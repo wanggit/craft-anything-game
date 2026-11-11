@@ -924,7 +924,7 @@ true-rebuild attempts (the person).
       ran. Naming the game as the rebuild's object on a web-page target sets the game-area focus;
       a local game or no target, and a request that names the page ("复刻这个游戏页面"), stay
       the whole target
-      — claimed: claude, branch bugfix/r2.12-game-request-focus
+      — claimed: claude, branch bugfix/r2.12-game-request-focus; PR #26
 
 ---
 
