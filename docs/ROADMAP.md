@@ -669,6 +669,15 @@ Owner: maintainers · Status: in progress
 ### R2.9 Everyday use: typing, projects, settings
 Owner: maintainers · Status: in progress
 Gaps found while using the app for real projects.
+- [ ] Reporting a broken deadlock freezes the whole app (poki.com/snake-vs-human, 2026-11-11:
+      the run hit a lock cycle, `tracker::remember` logged the report while holding the
+      tracker's registry, and the app's log sink takes tracked locks of its own — registry
+      re-entry self-deadlocked; the UI froze at the second of the report and every thread that
+      logged piled up behind it): no external call happens under the registry guard — the
+      report text travels out and is logged after the guard is dropped — with a regression
+      test that logs through a tracked lock (its own test program, so the process-wide logger
+      is its own)
+      — claimed: claude, branch bugfix/r2.9-lock-report-freeze
 - [ ] A builder's second `rebuild_check` in a row can fail with "checks/round-0 already exists"
       (seen in a live run): the self-check round folder's removal and re-creation between two asks
       in one turn needs looking at, and the second check should say what the first is still writing
