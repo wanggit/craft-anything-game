@@ -632,7 +632,7 @@ impl Worker {
         }
         // What the person asked to ignore ("only the game area") is read once, here, into the
         // typed field the study and checks follow (R2.11). Absent: the whole target, as ever.
-        let focus = project::read_focus(&ws.manifest.request);
+        let focus = project::read_focus(&ws.manifest.request, &ws.manifest.target);
         if ws.manifest.focus != focus {
             ws.manifest.focus = focus;
             ws.save()?;
