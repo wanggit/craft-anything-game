@@ -917,6 +917,14 @@ true-rebuild attempts (the person).
       settled frame (or a build's declared ready signal) before photographing
 - [ ] `capture_focus`'s step message double-says "the" ("Photographing the the game area") —
       focus.what already carries its article
+- [ ] Naming the game reaches the true-rebuild chain ("复刻这个游戏", "rebuild this game"): a
+      poki.com/snake-vs-human run (2026-11-11) rebuilt the portal page from screenshots because
+      read_focus only recognised explicit scoping words ("只关注游戏区域"), so the request's own
+      "复刻这个游戏" never set a focus and the five-stage brief, resources and play states never
+      ran. Naming the game as the rebuild's object on a web-page target sets the game-area focus;
+      a local game or no target, and a request that names the page ("复刻这个游戏页面"), stay
+      the whole target
+      — claimed: claude, branch bugfix/r2.12-game-request-focus
 
 ---
 
