@@ -939,7 +939,7 @@ true-rebuild attempts (the person).
       run whatever the photograph did — states first (the player's clicks reach a game behind a
       "moved" notice and load its lazy assets), the files after (keeping them), each with its
       honest note, and the crop fallback stays for the comparison pictures
-      — claimed: claude, branch bugfix/r2.12-focus-capture-deps
+      — claimed: claude, branch bugfix/r2.12-focus-capture-deps; PR #28
 - [ ] A game that only runs inside its page: poki serves its embed's URL a "has moved — click
       here to play" notice standalone while the game runs in the portal's iframe (snake-vs-human,
       2026-11-11). Decide what stands in for such a game — follow the notice the way the
