@@ -669,7 +669,7 @@ Owner: maintainers · Status: in progress
 ### R2.9 Everyday use: typing, projects, settings
 Owner: maintainers · Status: in progress
 Gaps found while using the app for real projects.
-- [ ] Reporting a broken deadlock freezes the whole app (poki.com/snake-vs-human, 2026-11-11:
+- [x] Reporting a broken deadlock freezes the whole app (poki.com/snake-vs-human, 2026-11-11:
       the run hit a lock cycle, `tracker::remember` logged the report while holding the
       tracker's registry, and the app's log sink takes tracked locks of its own — registry
       re-entry self-deadlocked; the UI froze at the second of the report and every thread that
@@ -677,7 +677,7 @@ Gaps found while using the app for real projects.
       report text travels out and is logged after the guard is dropped — with a regression
       test that logs through a tracked lock (its own test program, so the process-wide logger
       is its own)
-      — claimed: claude, branch bugfix/r2.9-lock-report-freeze
+      — claimed: claude, branch bugfix/r2.9-lock-report-freeze; PR #30
 - [ ] `regression_preview_limits_connections_and_releases_listener` fails on this Mac with
       `set_read_timeout` → EINVAL on an excess connection (2026-11-11, fails identically on a
       pristine tree; the Linux run is unknown) — needs its own look
