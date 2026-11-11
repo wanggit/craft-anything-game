@@ -931,7 +931,7 @@ true-rebuild attempts (the person).
       the game's files and play states, and the five-stage brief runs. The same choice headless:
       `web_game` on `rebuild_start`, `--web-game` on `rebuild`. It needs Deep (the chain reads
       the game's own files): the tile switches Deep on, and a start without Deep refuses and
-      names the one switch to make — claimed: claude, branch feature/r2.12-poki-game-tile
+      names the one switch to make — claimed: claude, branch feature/r2.12-poki-game-tile; PR #27
 
 ---
 
