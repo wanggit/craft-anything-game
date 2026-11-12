@@ -101,14 +101,15 @@ These apply to every change by every agent and contributor, whether or not anyon
   dependencies, add them to the roadmap rather than widening your change.
 
 ### Git workflow
-- Never commit to `main`. Branch from an up-to-date `main` with a standard prefix, then the roadmap id if
+- A change does not need a PR. Land it as a commit (on `main`, or on a branch you merge yourself). Open a PR
+  only when you want review or a check to run before landing.
+- One roadmap item (or pending change) per change. Keep changes small and reviewable. No unrelated refactors or
+  drive-by formatting.
+- Commit messages (and PR titles, when there is a PR) are plain English, present tense, what changed for the
+  person or developer.
+- When you work on a branch, branch from an up-to-date `main` with a standard prefix, then the roadmap id if
   there is one: `feature/`, `bugfix/`, `hotfix/` (urgent fix to released code), `refactor/`, `docs/`, `test/`
-  or `chore/` (tooling, deps, CI). Example: `feature/r1.1-target-kind`.
-- One roadmap item (or pending change) per PR. Keep PRs small and reviewable. No unrelated refactors or drive-by
-  formatting.
-- Open a PR into `main`. It is **squash-merged**, so the PR title is the commit message: plain English, present
-  tense, what changed for the person or developer.
-- Rebase on `main` before asking for review. Never force-push someone else's branch.
+  or `chore/` (tooling, deps, CI). Example: `feature/r1.1-target-kind`. Never force-push someone else's branch.
 - Parallel agents work in their own git worktree and their own `CARGO_TARGET_DIR` (see "Parallel agents" below).
 - Before every commit and push, check `git branch --show-current`; push by name (`git push origin <branch>`).
 
@@ -128,11 +129,11 @@ These apply to every change by every agent and contributor, whether or not anyon
 ### Done means
 - The checks in "Before you finish" pass for the crates you touched. New behaviour has tests; crash fixes have
   regression tests.
-- Docs updated in the same PR: the roadmap item ticked, STATUS.md if what works changed, `docs/tools.md` if you
+- Docs updated in the same change: the roadmap item ticked, STATUS.md if what works changed, `docs/tools.md` if you
   added tools.
 - Report what you verified and what you didn't. Never claim a live run you didn't do.
-- Made a mistake worth not repeating? Add it to `docs/pitfalls.md` in the same PR.
-- Found work that's missing or left for later? Add it as a `- [ ]` line under its roadmap item in the same PR
+- Made a mistake worth not repeating? Add it to `docs/pitfalls.md` in the same change.
+- Found work that's missing or left for later? Add it as a `- [ ]` line under its roadmap item in the same change
   (`cargo xtask pending` lists all open work).
 
 ## Extending
@@ -161,7 +162,7 @@ cargo xtask tools         # if you added tools (commit docs/tools.md)
 ```
 
 Then append a terse entry to `log/devlog.md` (what landed, numbers, what's still open). `log/` is gitignored:
-the devlog is a local scratch record; anything others need goes in the PR, `docs/STATUS.md` or `docs/ROADMAP.md`.
+the devlog is a local scratch record; anything others need goes in the commit message, `docs/STATUS.md` or `docs/ROADMAP.md`.
 
 ## Parallel agents
 
