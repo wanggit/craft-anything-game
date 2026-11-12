@@ -682,6 +682,15 @@ turning a fix's behaviour into a default: "adapt the original's code" meant reim
 the fix's run-the-original shortcut became the default for a day until the person asked why the
 game had not been rebuilt at all.
 
+**A check that graded a "moved" notice as the game.** The focused capture for
+poki.com/snake-vs-human (2026-11-12) was Poki's "Sorry! Snake Vs Human has moved" page, and the
+play states photographed the same notice; the check scored the build against it — 13% while the
+builder was building the game, 99% once it rebuilt the notice pixel-perfectly. The capture's own
+title said "has moved", and the notice even linked to the real game ("Click here to play!").
+Recognise a notice page (moved/gone/404) from the captured page's own words and follow its link
+the way a visitor would; a check must refuse to score a notice original and say what would make a
+real comparison, never grade against it. A green score needs the thing itself in the capture.
+
 ## Agent tooling
 
 **Shared CLI efforts reached Claude unchanged.** Keep CLI-only levels available for agents, but

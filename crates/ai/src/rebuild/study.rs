@@ -269,17 +269,14 @@ impl Worker {
             } else {
                 // A game goes on loading its assets long after the page settles; photographed too
                 // soon it is its loading screen, which the builder then chases (R2.11).
-                let until = std::time::Instant::now() + Duration::from_secs(FOCUS_LOAD_WAIT_SECS);
-                while std::time::Instant::now() < until {
-                    std::thread::sleep(Duration::from_millis(500));
-                    self.stop.check()?;
-                }
+                self.wait_for_load()?;
                 let mut call = |tool: &str, params: Value| self.call(tool, params);
+                let mut wait = || self.wait_for_load().map_err(|e| e.message);
                 // Bound to a name before the call: a session guard in the argument list lives
                 // until the statement ends — across every tool `call` makes, each of which takes
                 // the session again (2026-11-11's freeze).
                 let deep = !self.engine.session().clean_room();
-                let (captured, notes) = focus_keep(&mut call, &widths, &out, &focus.what, deep);
+                let (captured, notes) = focus_keep(&mut call, &mut wait, &widths, &out, &focus.what, deep);
                 for n in notes {
                     self.step(ws, Step::Study, Status::Inspecting, &n)?;
                 }
@@ -303,6 +300,17 @@ impl Worker {
                 &format!("The {} couldn't be cut out of the page's screenshots: the whole page is what gets compared.", focus.what),
             )?,
             n => self.step(ws, Step::Study, Status::Inspecting, &format!("Cut the {} out of the page's screenshots at {n} width(s).", focus.what))?,
+        }
+        Ok(())
+    }
+
+    /// The focused view's page gets [`FOCUS_LOAD_WAIT_SECS`] to load its assets before it is
+    /// photographed (R2.11); the person can stop the wait.
+    fn wait_for_load(&self) -> Result<(), ToolError> {
+        let until = std::time::Instant::now() + Duration::from_secs(FOCUS_LOAD_WAIT_SECS);
+        while std::time::Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(500));
+            self.stop.check()?;
         }
         Ok(())
     }
@@ -355,6 +363,20 @@ pub(super) fn focus_open_params(src: &str) -> Value {
     json!({"url": src, "settle_ms": 20_000})
 }
 
+/// How many notice-page links to follow before giving up: one notice can hand over to another
+/// on the way to the real thing (R2.13).
+pub(super) const MAX_NOTICE_HOPS: usize = 2;
+
+/// Photograph the open page into `out` the way the focus capture always does.
+fn capture_page(call: &mut dyn FnMut(&str, Value) -> Result<ToolOutput, ToolError>, out: &Path, widths: &[u32]) -> Result<ToolOutput, ToolError> {
+    call("web_site_capture", json!({"output_directory": out.display().to_string(), "include_html": false, "noise_pass": true, "widths": widths}))
+}
+
+/// What a capture wrote into its folder (`capture.json`), or None.
+fn read_capture_json(dir: &Path) -> Option<Value> {
+    std::fs::read(dir.join("capture.json")).ok().and_then(|b| serde_json::from_slice(&b).ok())
+}
+
 /// Once the focused page is open: its picture, then — whatever the picture did — the game's play
 /// states and its own files. The two saves are what a true rebuild is written from (R2.12/R2.13);
 /// a photograph that fails must not drop them (2026-11-11: a poki game's own page wouldn't
@@ -363,16 +385,66 @@ pub(super) fn focus_open_params(src: &str) -> Value {
 /// play!") and load its lazy assets, whose files the save then keeps. Each step is best effort —
 /// its failure is one plain note and the rebuild goes on — and the picture's own failure comes
 /// back for the caller's crop fallback.
+///
+/// What opened may itself be a notice page standing in for the target ("Sorry! X has moved",
+/// poki.com/snake-vs-human, 2026-11-12: the "game area" was Poki's moved page and the whole
+/// rebuild matched that). A visitor follows the notice's link, so does this: the real page is
+/// what gets photographed, and the notice is kept beside the capture as what was seen first.
 pub(super) fn focus_keep(
     call: &mut dyn FnMut(&str, Value) -> Result<ToolOutput, ToolError>,
+    wait: &mut dyn FnMut() -> Result<(), String>,
     widths: &[u32],
     out: &Path,
     what: &str,
     deep: bool,
 ) -> (Result<(), String>, Vec<String>) {
-    let captured =
-        call("web_site_capture", json!({"output_directory": out.display().to_string(), "include_html": false, "noise_pass": true, "widths": widths}));
+    let mut captured = capture_page(call, out, widths);
     let mut notes = Vec::new();
+    let mut followed = false;
+    for _ in 0..MAX_NOTICE_HOPS {
+        let Some(doc) = read_capture_json(out) else { break };
+        let Some(reason) = kinds::website::notice_page(&doc) else { break };
+        let href = kinds::website::notice_link(&doc).filter(|h| {
+            let h = h.trim();
+            !h.is_empty() && Some(h) != doc.get("url").and_then(Value::as_str)
+        });
+        let Some(href) = href else {
+            notes.push(format!("{reason} isn't {what}, and there's no link on it to follow."));
+            break;
+        };
+        notes.push(format!("{reason} isn't {what}: following its link to the real thing…"));
+        // Keep the notice beside the capture (it is the evidence of what was seen): the capture
+        // tool's folder must not exist yet, and a failed follow puts the notice back.
+        let aside = out.parent().map(|p| p.join(format!("{}-notice", out.file_name().unwrap_or_default().to_string_lossy())));
+        if let Some(aside) = &aside {
+            let _ = std::fs::remove_dir_all(aside);
+            let _ = std::fs::rename(out, aside);
+        }
+        if let Err(e) = call("web_site_open", focus_open_params(&href)) {
+            if let Some(aside) = &aside {
+                let _ = std::fs::rename(aside, out);
+            }
+            notes.push(format!("The notice's link to the real thing wouldn't open ({}).", e.message));
+            break;
+        }
+        let _ = wait();
+        captured = capture_page(call, out, widths);
+        if let Err(e) = &captured {
+            if let Some(aside) = &aside {
+                let _ = std::fs::rename(aside, out);
+            }
+            notes.push(format!("The real thing wouldn't photograph ({}).", e.message));
+            break;
+        }
+        followed = true;
+    }
+    match read_capture_json(out).as_ref().and_then(kinds::website::notice_page) {
+        Some(reason) => notes.push(format!(
+            "Only a notice page ({reason}) was photographed, never {what} itself: it can't be scored, and there are no screens of the real thing to match."
+        )),
+        None if followed => notes.push(format!("Where the notice's link led, the real thing was photographed (that is {what} itself).")),
+        None => {}
+    }
     // The game's play states (R2.13): tap through it the way a player would and photograph each
     // new screen — the check replays these against the build, so a rebuild of the boot screen
     // alone can no longer pass as the game.
@@ -507,7 +579,7 @@ mod tests {
                 _ => Ok(ToolOutput::Value(json!({}))),
             }
         };
-        let (captured, notes) = focus_keep(&mut fail_capture, &[1440], out, "the game area", true);
+        let (captured, notes) = focus_keep(&mut fail_capture, &mut || Ok(()), &[1440], out, "the game area", true);
         assert_eq!(captured.unwrap_err(), "the page wouldn't photograph");
         assert_eq!(calls, ["web_site_capture", "web_game_states_capture", "web_resources_save"], "the saves follow a failed picture, states first");
         assert!(notes[0].contains("play states") && notes[1].contains("own files"), "{notes:?}");
@@ -517,7 +589,7 @@ mod tests {
             calls.push(tool.to_string());
             Ok(ToolOutput::Value(json!({})))
         };
-        assert!(focus_keep(&mut ok, &[1440], out, "the game area", false).0.is_ok());
+        assert!(focus_keep(&mut ok, &mut || Ok(()), &[1440], out, "the game area", false).0.is_ok());
         assert_eq!(calls, ["web_site_capture", "web_game_states_capture"], "Clean room saves no files");
         // A save that fails is a plain note, not a stopped study.
         calls.clear();
@@ -528,8 +600,83 @@ mod tests {
                 _ => Ok(ToolOutput::Value(json!({}))),
             }
         };
-        let (captured, notes) = focus_keep(&mut fail_states, &[1440], out, "the game area", true);
+        let (captured, notes) = focus_keep(&mut fail_states, &mut || Ok(()), &[1440], out, "the game area", true);
         assert!(captured.is_ok() && notes[0].contains("couldn't be photographed") && notes[1].contains("own files"), "{notes:?}");
         assert_eq!(calls, ["web_site_capture", "web_game_states_capture", "web_resources_save"]);
+    }
+
+    /// R2.13 (poki.com/snake-vs-human, 2026-11-12): what opened is a notice page ("Sorry! X has
+    /// moved") standing in for the game. The study follows its link the way a visitor would and
+    /// photographs the real thing; the notice is kept beside the capture, not compared.
+    #[test]
+    fn a_notice_page_is_followed_and_the_real_thing_is_photographed() {
+        let d = tempfile::tempdir().unwrap();
+        let out = d.path().join("focus");
+        let notice = json!({
+            "title": "Sorry! Snake Vs Human has moved",
+            "text": "Sorry! Snake Vs Human has moved Click here to play!",
+            "url": "https://g.test/landing",
+            "links": [{"href": "https://g.test/play", "text": "Click here to play!"}]
+        });
+        let real = json!({"title": "Snake Vs Human", "text": "Play Snake Vs Human", "url": "https://g.test/play", "links": []});
+        let mut opens = Vec::new();
+        let mut first = true;
+        let mut call = |tool: &str, p: Value| match tool {
+            "web_site_open" => {
+                opens.push(p.get("url").and_then(Value::as_str).unwrap_or_default().to_string());
+                Ok(ToolOutput::Value(json!({})))
+            }
+            "web_site_capture" => {
+                let dir = PathBuf::from(p.get("output_directory").and_then(Value::as_str).unwrap_or_default());
+                std::fs::create_dir_all(&dir).unwrap();
+                let which = if first { &notice } else { &real };
+                first = false;
+                std::fs::write(dir.join("capture.json"), serde_json::to_vec(which).unwrap()).unwrap();
+                Ok(ToolOutput::Value(json!({})))
+            }
+            _ => Ok(ToolOutput::Value(json!({}))),
+        };
+        let mut waited = false;
+        let (captured, notes) = focus_keep(
+            &mut call,
+            &mut || {
+                waited = true;
+                Ok(())
+            },
+            &[1440],
+            &out,
+            "the game area",
+            true,
+        );
+        assert!(captured.is_ok(), "{notes:?}");
+        assert_eq!(opens, ["https://g.test/play"], "the notice's link is where it goes");
+        assert!(waited, "the real page gets its load wait too");
+        assert!(notes[0].contains("has moved") && notes[0].contains("following its link"), "{notes:?}");
+        assert!(notes.iter().any(|n| n.contains("the real thing was photographed")), "{notes:?}");
+        let got = std::fs::read_to_string(out.join("capture.json")).unwrap();
+        assert!(got.contains("Snake Vs Human") && !got.contains("has moved"), "the real page is what was captured: {got}");
+        let kept = std::fs::read_to_string(d.path().join("focus-notice").join("capture.json")).unwrap();
+        assert!(kept.contains("has moved"), "the notice is kept beside the capture: {kept}");
+    }
+
+    /// A notice with no link to follow says plainly that only the notice was photographed — the
+    /// check refuses to score one, so nobody mistakes it for the thing itself.
+    #[test]
+    fn a_notice_with_no_link_says_only_the_notice_was_photographed() {
+        let d = tempfile::tempdir().unwrap();
+        let out = d.path().join("focus");
+        let mut call = |tool: &str, p: Value| {
+            if tool == "web_site_capture" {
+                let dir = PathBuf::from(p.get("output_directory").and_then(Value::as_str).unwrap_or_default());
+                std::fs::create_dir_all(&dir).unwrap();
+                let doc = json!({"title": "Sorry! This game has moved", "text": "Sorry! This game has moved", "url": "https://g.test/x", "links": []});
+                std::fs::write(dir.join("capture.json"), serde_json::to_vec(&doc).unwrap()).unwrap();
+            }
+            Ok(ToolOutput::Value(json!({})))
+        };
+        let (captured, notes) = focus_keep(&mut call, &mut || Ok(()), &[1440], &out, "the game area", false);
+        assert!(captured.is_ok(), "{notes:?}");
+        assert!(notes[0].contains("has moved") && notes[0].contains("no link"), "{notes:?}");
+        assert!(notes.iter().any(|n| n.contains("never the game area itself")), "{notes:?}");
     }
 }
