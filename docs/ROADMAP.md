@@ -1044,6 +1044,15 @@ the states.
       backoff and resume the agent session on their own (two attempts gave up mid-outage today);
       a resume prompt travels as an argument (stdin came out empty and the turn ran with no
       prompt at all) — claimed: claude, branch feature/r2.13-resilience; PR #23
+- [x] A notice page never stands in for the game (poki.com/snake-vs-human, 2026-11-12: Poki's
+      "Sorry! X has moved" page was captured as "the game area", its "Click here to play!" link
+      was never followed, and the check went 99% green on a pixel-perfect copy of the notice
+      after a 13% for building the game): the study recognises a moved/gone/404 notice from the
+      capture's own words (the title always, a short body only), follows its link to the real
+      thing (bounded hops, the notice kept in capture/focus-notice/, the real page gets its load
+      wait), and the web check refuses to score a notice original — no likeness, an unknown, and
+      words saying a real comparison needs the thing itself photographed
+      — claimed: claude, branch bugfix/r2.13-notice-page
 
 ---
 

@@ -1002,6 +1002,37 @@ fn the_website_check_with_no_site_says_where_it_looked() {
     }
 }
 
+/// R2.13 (poki.com/snake-vs-human, 2026-11-12): the captured original was Poki's "moved" notice
+/// and the check went 99% green on a pixel-perfect copy of it. A notice original is refused:
+/// no score, an unknown, and words that say what would make a real comparison.
+#[test]
+fn the_website_check_refuses_to_score_a_notice_page_original() {
+    use craft_anything_engine::workspace::Focus;
+    let d = tempfile::tempdir().unwrap();
+    let mut ws = Workspace::create(d.path(), "Game", "复刻这个游戏", TargetRef::Website { url: "https://poki.com/zh/g/snake-vs-human".into() }).unwrap();
+    ws.manifest.focus = Some(Focus { what: "the game area".into(), element_id: None });
+    // The focused capture is the notice, exactly as the 2026-11-12 run captured it.
+    let focus_dir = ws.capture_dir().join("focus");
+    std::fs::create_dir_all(&focus_dir).unwrap();
+    let notice = serde_json::json!({
+        "title": "Sorry! Snake Vs Human has moved",
+        "text": "Sorry! Snake Vs Human has moved Click here to play!",
+        "links": [{"href": "https://poki.com/en/g/snake-vs-human", "text": "Click here to play!"}]
+    });
+    std::fs::write(focus_dir.join("capture.json"), serde_json::to_vec(&notice).unwrap()).unwrap();
+    // A build exists — the notice copy that used to score 99%.
+    std::fs::create_dir_all(ws.app_dir().join("dist")).unwrap();
+    std::fs::write(ws.app_dir().join("dist").join("index.html"), "<h1>Sorry! Snake Vs Human has moved</h1>").unwrap();
+    let r = check_worker(&ws, true).run_checks(&ws, &kinds::WebsiteKind, 1).unwrap();
+    assert_eq!(r.len(), 1);
+    assert_eq!(r[0].check, CheckResult::WEB_VISUAL);
+    assert!(!r[0].passed, "{:?}", r[0]);
+    assert!(r[0].similarity.is_none(), "a notice original is never scored: {:?}", r[0]);
+    let note = &r[0].note;
+    assert!(note.contains("notice page") && note.contains("has moved") && note.contains("proves nothing"), "{note}");
+    assert!(r[0].unknowns.iter().any(|u| u.contains("notice page")), "{:?}", r[0].unknowns);
+}
+
 #[test]
 fn a_picked_game_is_rebuilt_with_its_own_engine_when_we_can() {
     let d = tempfile::tempdir().unwrap();

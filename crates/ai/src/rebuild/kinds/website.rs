@@ -762,6 +762,59 @@ fn read_json(path: &Path) -> Option<Value> {
     std::fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok())
 }
 
+/// Words a notice page says instead of the thing itself: "… has moved", "… no longer available",
+/// a 404. Matched against the captured page's title always, and against its text only while the
+/// text is short (under [`NOTICE_TEXT_CHARS`]), so a real page whose content merely mentions one
+/// of these phrases is never mistaken for a notice (R2.13, poki.com/snake-vs-human, 2026-11-12:
+/// Poki's "Sorry! X has moved" page was captured as "the game area", the play states photographed
+/// the same notice, and the check went 99% green on a pixel-perfect copy of it).
+const NOTICE_PHRASES: &[&str] = &[
+    "has moved",
+    "have moved",
+    "moved to a new",
+    "no longer available",
+    "can no longer be played",
+    "cannot be played here",
+    "can't be played here",
+    "has been removed",
+    "have been removed",
+    "has been taken down",
+    "has been discontinued",
+    "page not found",
+    "404 not found",
+    "error 404",
+    "this content is not available",
+];
+
+/// How much of the page's own text still counts as "the page is only this" in [`notice_page`].
+const NOTICE_TEXT_CHARS: usize = 800;
+
+/// Whether a capture's `capture.json` is a notice page — a moved/gone/404 screen a visitor sees
+/// *instead of* the target — and what it says ("«Sorry! X has moved»"). `None` for the thing
+/// itself. A notice can never be what the build is compared against: matching it proves nothing.
+pub fn notice_page(doc: &Value) -> Option<String> {
+    let title = doc.get("title").and_then(Value::as_str).unwrap_or_default().trim();
+    let text = doc.get("text").and_then(Value::as_str).unwrap_or_default().trim();
+    let title_l = title.to_lowercase();
+    let in_title = NOTICE_PHRASES.iter().find(|p| title_l.contains(*p));
+    let in_text = (text.chars().count() < NOTICE_TEXT_CHARS)
+        .then(|| NOTICE_PHRASES.iter().find(|p| format!("{title_l}\n{}", text.to_lowercase()).contains(*p)))
+        .flatten();
+    let phrase = in_title.or(in_text)?;
+    Some(if title.is_empty() { format!("the page says “{phrase}”") } else { format!("“{title}”") })
+}
+
+/// The link a notice page offers to the real thing ("Click here to play!"): its href. The most
+/// doorway-like link wins, else the first link that goes anywhere (R2.13).
+pub fn notice_link(doc: &Value) -> Option<String> {
+    let links = doc.get("links").and_then(Value::as_array)?;
+    let href = |l: &Value| l.get("href").and_then(Value::as_str).unwrap_or_default().trim().to_string();
+    let text = |l: &Value| l.get("text").and_then(Value::as_str).unwrap_or_default().to_lowercase();
+    let doorway = ["play", "continue", "here", "go to", "visit"];
+    let best = links.iter().find(|l| !href(l).is_empty() && doorway.iter().any(|w| text(l).contains(w)));
+    best.or_else(|| links.iter().find(|l| !href(l).is_empty())).map(href)
+}
+
 /// A picture of the build against the original's, in percent: (likeness, layout, detail), then
 /// the two heights in px, and whether the frames were compared as they are (the noise mask that
 /// would have left nothing to compare was dropped).
@@ -1175,17 +1228,38 @@ impl Check for WebVisualCheck {
         let Some(site) = site_dir(&ws.app_dir()) else {
             return Ok(CheckResult::new(self.id(), round, false, missing_site_note(ws.app_place(), app_is_empty(ws))));
         };
+        // A focused rebuild (R2.11) compares only its part — the part's own capture against the
+        // build — and everything the person scoped out (the page around it, its other pages and
+        // its menus) stays un-compared. Without a focus, everything is compared exactly as ever.
+        let focus = ws.manifest.focus.clone();
+        let originals = check_scope(ws);
+        // R2.13: the captured original must be the target itself, never a notice page ("Sorry! X
+        // has moved" with a "Click here to play!" link): matching a notice proves nothing, and a
+        // score against one is a lie the builder then chases (poki.com/snake-vs-human,
+        // 2026-11-12: 13% for building the game, 99% for copying Poki's "moved" page).
+        if let Some(reason) = read_json(&originals.join("capture.json")).as_ref().and_then(notice_page) {
+            let what = focus.as_ref().map_or_else(|| "the site".to_string(), |f| f.what.clone());
+            let mut r = CheckResult::new(
+                self.id(),
+                round,
+                false,
+                format!(
+                    "The captured original is a notice page, not {what} itself ({reason}). \
+No screen of the real thing was ever captured, so nothing here can be compared: a build that matches this notice proves nothing. \
+Build the real thing from the original's own files and data in capture/ (never chase matching this notice), and say in your summary that no screen of the original was ever seen. \
+A real comparison needs {what} itself photographed first — follow the notice's link and capture again."
+                ),
+            );
+            r.focus = focus.map(|f| f.what);
+            r.unknowns.push(format!("no screen of {what} itself was ever captured — only a notice page"));
+            return Ok(r);
+        }
         let base = cx.serve_preview(&site)?;
         let out = ws.checks_dir().join(format!("round-{round}"));
         if out.exists() {
             let _ = std::fs::remove_dir_all(&out);
         }
         std::fs::create_dir_all(ws.checks_dir()).map_err(|e| ToolError::io(ws.checks_dir().display(), e))?;
-        // A focused rebuild (R2.11) compares only its part — the part's own capture against the
-        // build — and everything the person scoped out (the page around it, its other pages and
-        // its menus) stays un-compared. Without a focus, everything is compared exactly as ever.
-        let focus = ws.manifest.focus.clone();
-        let originals = check_scope(ws);
         let mut notes = Vec::new();
         if let Some(f) = &focus {
             notes.push(format!("Only the {} is compared — the person asked for just that part, and the page around it is out of scope.", f.what));
@@ -1588,5 +1662,41 @@ mod tests {
         assert!(r.starts_with("Check 1: compared with the original, your build looks 50% alike (note)."), "{r}");
         assert!(r.contains("screenshot-<width>.png for each width, and routes/<page>/ for other pages"), "{r}");
         assert!(r.contains("the original's are in capture/. Open each pair with the Read tool"), "{r}");
+    }
+
+    /// R2.13 (poki.com/snake-vs-human, 2026-11-12): Poki's "moved" page was captured as "the
+    /// game area" and the check went 99% green on a copy of the notice. A notice page is
+    /// recognised from what it says — and a real page whose content merely mentions moving is
+    /// never mistaken for one.
+    #[test]
+    fn a_notice_page_is_recognised_and_a_real_page_is_not() {
+        let poki = json!({"title": "Sorry! Snake Vs Human has moved", "text": "Sorry! Snake Vs Human has moved Click here to play!"});
+        assert_eq!(notice_page(&poki).as_deref(), Some("“Sorry! Snake Vs Human has moved”"));
+        let gone = json!({"title": "Puzzle Quest", "text": "This content is not available in your country."});
+        assert!(notice_page(&gone).is_some());
+        let missing = json!({"title": "404 not found", "text": ""});
+        assert!(notice_page(&missing).is_some());
+        let body = json!({"title": "", "text": "Sorry, this game has moved to a new home."});
+        assert_eq!(notice_page(&body).as_deref(), Some("the page says “has moved”"));
+        // A long page whose content merely mentions moving is the thing itself.
+        let real = json!({"title": "Snake Vs Human — play online", "text": format!("The castle has moved north. {}", "Shoot the snakes. ".repeat(80))});
+        assert!(notice_page(&real).is_none(), "a long page's content never turns it into a notice");
+        assert!(notice_page(&json!({"title": "Snake Vs Human", "text": "Click to play"})).is_none(), "an ordinary start screen is not a notice");
+        assert!(notice_page(&json!({})).is_none());
+    }
+
+    /// R2.13: the notice's own link to the real thing ("Click here to play!") is the one to
+    /// follow; any other link is second best, and no links means nowhere to go.
+    #[test]
+    fn the_notices_link_to_the_real_thing_is_picked() {
+        let doc = json!({"links": [
+            {"href": "https://x.test/privacy", "text": "Privacy"},
+            {"href": "https://x.test/play", "text": "Click here to play!"}
+        ]});
+        assert_eq!(notice_link(&doc).as_deref(), Some("https://x.test/play"));
+        let plain = json!({"links": [{"href": "https://x.test/new-home", "text": "Go"}]});
+        assert_eq!(notice_link(&plain).as_deref(), Some("https://x.test/new-home"));
+        assert!(notice_link(&json!({"links": []})).is_none());
+        assert!(notice_link(&json!({})).is_none());
     }
 }
